@@ -57,7 +57,7 @@ export default function HomeScreen() {
 
   const handleVpnToggle = async () => {
     if (Platform.OS !== "android") {
-      Alert.alert("Только Android", "VPN-туннель доступен в приложении CyberVPN для Android.");
+      setVpnError("VPN работает только в установленной нативной Android-сборке. Web Preview и Expo Go не могут запустить системный VpnService.");
       return;
     }
     if (vpnState === "disconnecting") return;
