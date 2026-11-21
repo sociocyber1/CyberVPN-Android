@@ -1,0 +1,70 @@
+buildscript {
+  def kotlinVersion = rootProject.ext.has('kotlinVersion') ? rootProject.ext.kotlinVersion : '2.1.20'
+  repositories {
+    google()
+    mavenCentral()
+  }
+  dependencies {
+    classpath "org.jetbrains.kotlin:kotlin-serialization:${kotlinVersion}"
+  }
+}
+
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+apply plugin: 'kotlinx-serialization'
+
+group = 'ru.cybervpn'
+version = '1.0.0'
+
+android {
+  namespace 'expo.modules.cybervpn'
+  defaultConfig {
+    minSdk 29
+    versionCode 1
+    versionName '1.0.0'
+    consumerProguardFiles 'consumer-rules.pro'
+  }
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_21
+    targetCompatibility JavaVersion.VERSION_21
+  }
+}
+
+dependencies {
+  implementation 'com.facebook.react:react-android'
+  implementation 'androidx.core:core-ktx:1.15.0'
+  implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0'
+  implementation 'org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.1'
+  compileOnly files('libs/golib.aar')
+}
+
+tasks.register('buildHysteriaAar', Exec) {
+  group = 'build'
+  description = 'Build the pinned Hysteria2 Go mobile core with gomobile.'
+  workingDir projectDir
+  commandLine 'bash', file('build-hysteria-aar.sh').absolutePath
+  inputs.dir(file('golib'))
+  inputs.file(file('hysteria-upstream-commit.txt'))
+  outputs.file(file('libs/golib.aar'))
+}
+
+tasks.named('preBuild').configure {
+  dependsOn tasks.named('buildHysteriaAar')
+}
+
+// gomobile produces an AAR with both Java bindings and ABI-specific JNI files.
+// As in the upstream Bedlam Android app, consume it from the application module
+// rather than nesting one AAR inside this Expo library AAR.
+gradle.projectsEvaluated {
+  def aarBuildTask = project.tasks.named('buildHysteriaAar')
+  def appProject = rootProject.subprojects.find { it.plugins.hasPlugin('com.android.application') }
+  if (appProject != null) {
+    appProject.dependencies.add('implementation', files(file('libs/golib.aar')))
+    appProject.tasks.matching { it.name.contains('Dependencies') }.configureEach {
+      dependsOn aarBuildTask
+    }
+  }
+}

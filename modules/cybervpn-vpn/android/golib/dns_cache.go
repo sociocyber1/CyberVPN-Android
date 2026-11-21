@@ -1,0 +1,638 @@
+package golib
+
+import (
+	"container/list"
+	"context"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"strconv"
+	"sync"
+	"time"
+
+	"golang.org/x/sync/singleflight"
+)
+
+var errDNSQueryInvalid = errors.New("not a DNS query with one question")
+
+const (
+	dnsCacheMaxEntries     = 1024
+	dnsCacheMaxTTL         = 1 * time.Hour
+	dnsCacheNegativeMaxTTL = 5 * time.Minute
+)
+
+const (
+	dnsRcodeNoError  = 0
+	dnsRcodeNXDomain = 3
+	dnsTypeSOA       = 6
+	soaMinRDataLen   = 22
+)
+
+type dnsCacheEntry struct {
+	key      string
+	response []byte
+	storedAt time.Time
+	expiry   time.Time
+	elem     *list.Element // position in LRU order
+}
+
+type dnsCache struct {
+	mu      sync.RWMutex
+	entries map[string]*dnsCacheEntry
+	lru     *list.List // front = most recently used
+	sf      singleflight.Group
+	enabled bool
+	epoch   uint64
+}
+
+func newDNSCache() *dnsCache {
+	return &dnsCache{
+		entries: make(map[string]*dnsCacheEntry),
+		lru:     list.New(),
+		enabled: true,
+	}
+}
+
+func (c *dnsCache) resolve(ctx context.Context, r dnsResolver, query []byte, onTunnel func(tx, rx int)) ([]byte, error) {
+	txID, qKey, ok := parseDNSQuery(query)
+	if !ok {
+		return nil, fmt.Errorf("%w (%d bytes)", errDNSQueryInvalid, len(query))
+	}
+
+	if !dnsQueryCacheSafe(query) {
+		resp, err := r.exchange(ctx, query)
+		countTunnelDNS(onTunnel, query, resp, err)
+		return resp, err
+	}
+
+	c.mu.RLock()
+	enabled, epoch := c.enabled, c.epoch
+	c.mu.RUnlock()
+	if !enabled {
+		resp, err := r.exchange(ctx, query)
+		countTunnelDNS(onTunnel, query, resp, err)
+		return resp, err
+	}
+	cacheKey := strconv.FormatUint(epoch, 10) + "\x00" + r.id() + "\x00" + qKey
+
+	if resp := c.lookup(cacheKey, txID); resp != nil {
+		return resp, nil
+	}
+
+	result, err, _ := c.sf.Do(cacheKey, func() (any, error) {
+		if !c.isCurrentEpoch(epoch) {
+			resp, err := r.exchange(ctx, query)
+			countTunnelDNS(onTunnel, query, resp, err)
+			return resp, err
+		}
+		if resp := c.lookup(cacheKey, txID); resp != nil {
+			return resp, nil
+		}
+
+		// Coalesced callers share this result, so the shared work gets its own
+		// full budget instead of inheriting whatever the leader had left.
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			deadline = time.Now().Add(dnsQueryTimeout)
+		}
+		sctx, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline)
+		defer cancel()
+		sctx = withLateAnswer(sctx, func(late []byte) { c.storeLateEpoch(epoch, cacheKey, late) })
+
+		resp, err := r.exchange(sctx, query)
+		countTunnelDNS(onTunnel, query, resp, err)
+		if err != nil {
+			return nil, err
+		}
+
+		if ttl := cacheableTTL(resp); ttl > 0 {
+			c.storeEpoch(epoch, cacheKey, resp, ttl)
+		}
+		return resp, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	shared := result.([]byte)
+	out := make([]byte, len(shared))
+	copy(out, shared)
+	if len(out) >= 2 {
+		binary.BigEndian.PutUint16(out[:2], txID)
+	}
+	return out, nil
+}
+
+// A cache hit needs no network, so callers can answer it without spending one
+// of the in-flight query slots.
+func (c *dnsCache) tryCached(r dnsResolver, query []byte) []byte {
+	txID, qKey, ok := parseDNSQuery(query)
+	if !ok || !dnsQueryCacheSafe(query) {
+		return nil
+	}
+	c.mu.RLock()
+	enabled, epoch := c.enabled, c.epoch
+	c.mu.RUnlock()
+	if !enabled {
+		return nil
+	}
+	return c.lookup(strconv.FormatUint(epoch, 10)+"\x00"+r.id()+"\x00"+qKey, txID)
+}
+
+func (c *dnsCache) drop(r dnsResolver, query []byte) {
+	_, qKey, ok := parseDNSQuery(query)
+	if !ok || !dnsQueryCacheSafe(query) {
+		return
+	}
+	c.mu.Lock()
+	key := strconv.FormatUint(c.epoch, 10) + "\x00" + r.id() + "\x00" + qKey
+	if entry := c.entries[key]; entry != nil {
+		delete(c.entries, key)
+		c.lru.Remove(entry.elem)
+	}
+	c.mu.Unlock()
+}
+
+func (c *dnsCache) isCurrentEpoch(epoch uint64) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.enabled && c.epoch == epoch
+}
+
+type lateAnswerKey struct{}
+
+func withLateAnswer(ctx context.Context, store func(resp []byte)) context.Context {
+	return context.WithValue(ctx, lateAnswerKey{}, store)
+}
+
+func lateAnswer(ctx context.Context) func(resp []byte) {
+	if store, ok := ctx.Value(lateAnswerKey{}).(func([]byte)); ok {
+		return store
+	}
+	return func([]byte) {}
+}
+
+func (c *dnsCache) storeLate(key string, resp []byte) {
+	c.mu.RLock()
+	epoch := c.epoch
+	c.mu.RUnlock()
+	c.storeLateEpoch(epoch, key, resp)
+}
+
+func (c *dnsCache) storeLateEpoch(epoch uint64, key string, resp []byte) {
+	ttl := cacheableTTL(resp)
+	if ttl <= 0 {
+		return
+	}
+	respCopy := make([]byte, len(resp))
+	copy(respCopy, resp)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.enabled || c.epoch != epoch {
+		return
+	}
+	if entry, ok := c.entries[key]; ok && time.Now().Before(entry.expiry) {
+		return
+	}
+	c.storeLocked(key, respCopy, ttl)
+}
+
+func (c *dnsCache) lookup(key string, txID uint16) []byte {
+	c.mu.Lock()
+	entry, ok := c.entries[key]
+	if !ok || time.Now().After(entry.expiry) {
+		c.mu.Unlock()
+		return nil
+	}
+	c.lru.MoveToFront(entry.elem)
+	resp := make([]byte, len(entry.response))
+	copy(resp, entry.response)
+	age := time.Since(entry.storedAt)
+	c.mu.Unlock()
+	decrementTTLs(resp, age)
+	if len(resp) >= 2 {
+		binary.BigEndian.PutUint16(resp[:2], txID)
+	}
+	return resp
+}
+
+func countTunnelDNS(onTunnel func(tx, rx int), query, resp []byte, err error) {
+	if onTunnel == nil {
+		return
+	}
+	rx := 0
+	if err == nil {
+		rx = len(resp)
+	}
+	onTunnel(len(query), rx)
+}
+
+func (c *dnsCache) store(key string, response []byte, ttl time.Duration) {
+	c.mu.RLock()
+	epoch := c.epoch
+	c.mu.RUnlock()
+	c.storeEpoch(epoch, key, response, ttl)
+}
+
+func (c *dnsCache) storeEpoch(epoch uint64, key string, response []byte, ttl time.Duration) {
+	respCopy := make([]byte, len(response))
+	copy(respCopy, response)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.enabled || c.epoch != epoch {
+		return
+	}
+	c.storeLocked(key, respCopy, ttl)
+}
+
+func (c *dnsCache) storeLocked(key string, respCopy []byte, ttl time.Duration) {
+	if existing, ok := c.entries[key]; ok {
+		existing.response = respCopy
+		existing.storedAt = time.Now()
+		existing.expiry = time.Now().Add(ttl)
+		c.lru.MoveToFront(existing.elem)
+		return
+	}
+
+	for len(c.entries) >= dnsCacheMaxEntries {
+		oldest := c.lru.Back()
+		if oldest == nil {
+			break
+		}
+		c.removeLocked(oldest.Value.(*dnsCacheEntry))
+	}
+
+	entry := &dnsCacheEntry{
+		key:      key,
+		response: respCopy,
+		storedAt: time.Now(),
+		expiry:   time.Now().Add(ttl),
+	}
+	entry.elem = c.lru.PushFront(entry)
+	c.entries[key] = entry
+}
+
+func (c *dnsCache) removeLocked(e *dnsCacheEntry) {
+	c.lru.Remove(e.elem)
+	delete(c.entries, e.key)
+}
+
+func (c *dnsCache) clear() {
+	c.mu.Lock()
+	c.epoch++
+	c.entries = make(map[string]*dnsCacheEntry)
+	c.lru.Init()
+	c.mu.Unlock()
+}
+
+func (c *dnsCache) setEnabled(enabled bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.enabled == enabled {
+		return
+	}
+	c.enabled = enabled
+	c.epoch++
+	c.entries = make(map[string]*dnsCacheEntry)
+	c.lru.Init()
+}
+
+func parseDNSQuery(query []byte) (uint16, string, bool) {
+	if !validDNSQuery(query) {
+		return 0, "", false
+	}
+	question, ok := dnsQuestion(query)
+	if !ok {
+		return 0, "", false
+	}
+	txID := binary.BigEndian.Uint16(query[0:2])
+	return txID, question + "\x00" + dnsQuerySignature(query), true
+}
+
+// Only share requests whose additional records cannot carry requester-specific
+// semantics. In particular ECS, Cookies, and TSIG must not share answers or
+// singleflight work with another request.
+func dnsQueryCacheSafe(msg []byte) bool {
+	if !validDNSQuery(msg) {
+		return false
+	}
+	qdCount := binary.BigEndian.Uint16(msg[4:6])
+	anCount := binary.BigEndian.Uint16(msg[6:8])
+	nsCount := binary.BigEndian.Uint16(msg[8:10])
+	arCount := binary.BigEndian.Uint16(msg[10:12])
+	pos := 12
+	for i := uint16(0); i < qdCount; i++ {
+		np := skipName(msg, pos)
+		if np < 0 || np+4 > len(msg) {
+			return false
+		}
+		pos = np + 4
+	}
+	for i := 0; i < int(anCount)+int(nsCount); i++ {
+		np := skipName(msg, pos)
+		if np < 0 || np+10 > len(msg) {
+			return false
+		}
+		pos = np + 10 + int(binary.BigEndian.Uint16(msg[np+8:np+10]))
+		if pos > len(msg) {
+			return false
+		}
+	}
+	for i := uint16(0); i < arCount; i++ {
+		np := skipName(msg, pos)
+		if np < 0 || np+10 > len(msg) || binary.BigEndian.Uint16(msg[np:np+2]) != 41 {
+			return false
+		}
+		rdataLen := int(binary.BigEndian.Uint16(msg[np+8 : np+10]))
+		if rdataLen != 0 {
+			return false
+		}
+		pos = np + 10
+	}
+	return true
+}
+
+// dnsQuestion returns the single question as a comparison key, with the name
+// lowercased so 0x20-randomising clients share cache entries. Label length
+// bytes are at most 63 and compression pointers start at 0xc0, so neither can
+// be mistaken for an upper-case letter.
+func dnsQuestion(msg []byte) (string, bool) {
+	if len(msg) < 12 || binary.BigEndian.Uint16(msg[4:6]) != 1 {
+		return "", false
+	}
+	end := skipName(msg, 12)
+	if end < 0 || end+4 > len(msg) {
+		return "", false
+	}
+	q := make([]byte, end+4-12)
+	copy(q, msg[12:end+4])
+	for i := 0; i < len(q)-4; i++ {
+		if c := q[i]; c >= 'A' && c <= 'Z' {
+			q[i] = c + ('a' - 'A')
+		}
+	}
+	return string(q), true
+}
+
+// dnsQuerySignature separates cache entries whose answers are not
+// interchangeable: an EDNS0 client accepting 4096 bytes must not be answered
+// from an entry created for a 512-byte client, and DO/CD change the content.
+func dnsQuerySignature(query []byte) string {
+	var flags byte
+	if query[2]&0x01 != 0 {
+		flags |= 1
+	}
+	if query[3]&0x10 != 0 {
+		flags |= 2
+	}
+	udpSize, do, ok := ednsOptions(query)
+	if !ok {
+		return "f" + strconv.Itoa(int(flags))
+	}
+	d := 0
+	if do {
+		d = 1
+	}
+	return "f" + strconv.Itoa(int(flags)) +
+		".e" + strconv.Itoa(int(udpSize)) +
+		"." + strconv.Itoa(d)
+}
+
+func ednsOptions(msg []byte) (udpSize uint16, do bool, ok bool) {
+	if len(msg) < 12 {
+		return 0, false, false
+	}
+	qdCount := binary.BigEndian.Uint16(msg[4:6])
+	anCount := binary.BigEndian.Uint16(msg[6:8])
+	nsCount := binary.BigEndian.Uint16(msg[8:10])
+	arCount := binary.BigEndian.Uint16(msg[10:12])
+
+	pos := 12
+	for i := uint16(0); i < qdCount; i++ {
+		np := skipName(msg, pos)
+		if np < 0 || np+4 > len(msg) {
+			return 0, false, false
+		}
+		pos = np + 4
+	}
+	for i := 0; i < int(anCount)+int(nsCount); i++ {
+		np := skipName(msg, pos)
+		if np < 0 || np+10 > len(msg) {
+			return 0, false, false
+		}
+		pos = np + 10 + int(binary.BigEndian.Uint16(msg[np+8:np+10]))
+		if pos > len(msg) {
+			return 0, false, false
+		}
+	}
+	for i := uint16(0); i < arCount; i++ {
+		np := skipName(msg, pos)
+		if np < 0 || np+10 > len(msg) {
+			return 0, false, false
+		}
+		if binary.BigEndian.Uint16(msg[np:np+2]) == 41 {
+			return binary.BigEndian.Uint16(msg[np+2 : np+4]),
+				binary.BigEndian.Uint32(msg[np+4:np+8])&0x8000 != 0,
+				true
+		}
+		pos = np + 10 + int(binary.BigEndian.Uint16(msg[np+8:np+10]))
+		if pos > len(msg) {
+			return 0, false, false
+		}
+	}
+	return 0, false, false
+}
+
+func cacheableTTL(response []byte) time.Duration {
+	if len(response) < 12 {
+		return 0
+	}
+	rcode := response[3] & 0x0f
+	if rcode != dnsRcodeNoError && rcode != dnsRcodeNXDomain {
+		return 0
+	}
+	// A truncated answer is incomplete by definition; caching it would also
+	// pin the TC bit and suppress the client's own TCP retry for the TTL.
+	if response[2]&0x02 != 0 {
+		return 0
+	}
+	qdCount := binary.BigEndian.Uint16(response[4:6])
+	anCount := binary.BigEndian.Uint16(response[6:8])
+	nsCount := binary.BigEndian.Uint16(response[8:10])
+	if qdCount != 1 {
+		return 0
+	}
+
+	pos := skipName(response, 12)
+	if pos < 0 || pos+4 > len(response) {
+		return 0
+	}
+	pos += 4
+
+	answerTTL, pos, ok := minRecordTTL(response, pos, anCount)
+	if !ok {
+		return 0
+	}
+
+	if rcode == dnsRcodeNoError && anCount > 0 {
+		if answerTTL == 0 {
+			return 0
+		}
+		return min(time.Duration(answerTTL)*time.Second, dnsCacheMaxTTL)
+	}
+
+	ttl, ok := negativeTTL(response, pos, nsCount)
+	if !ok {
+		return 0
+	}
+	if anCount > 0 && answerTTL < ttl {
+		ttl = answerTTL
+	}
+	if ttl == 0 {
+		return 0
+	}
+	return min(time.Duration(ttl)*time.Second, dnsCacheNegativeMaxTTL)
+}
+
+func minRecordTTL(msg []byte, pos int, count uint16) (uint32, int, bool) {
+	var minTTL uint32
+	for i := uint16(0); i < count; i++ {
+		np := skipName(msg, pos)
+		if np < 0 || np+10 > len(msg) {
+			return 0, 0, false
+		}
+		ttl := binary.BigEndian.Uint32(msg[np+4 : np+8])
+		if i == 0 || ttl < minTTL {
+			minTTL = ttl
+		}
+		pos = np + 10 + int(binary.BigEndian.Uint16(msg[np+8:np+10]))
+		if pos > len(msg) {
+			return 0, 0, false
+		}
+	}
+	return minTTL, pos, true
+}
+
+func negativeTTL(msg []byte, pos int, nsCount uint16) (uint32, bool) {
+	for i := uint16(0); i < nsCount; i++ {
+		np := skipName(msg, pos)
+		if np < 0 || np+10 > len(msg) {
+			return 0, false
+		}
+		end := np + 10 + int(binary.BigEndian.Uint16(msg[np+8:np+10]))
+		if end > len(msg) {
+			return 0, false
+		}
+		if minimum, ok := soaMinimum(msg, np, end); ok {
+			return min(binary.BigEndian.Uint32(msg[np+4:np+8]), minimum), true
+		}
+		pos = end
+	}
+	return 0, false
+}
+
+func soaMinimum(msg []byte, typePos, end int) (uint32, bool) {
+	if binary.BigEndian.Uint16(msg[typePos:typePos+2]) != dnsTypeSOA || end-(typePos+10) < soaMinRDataLen {
+		return 0, false
+	}
+	return binary.BigEndian.Uint32(msg[end-4 : end]), true
+}
+
+func clampDuration(d, lo, hi time.Duration) time.Duration {
+	return max(lo, min(d, hi))
+}
+
+// A cached answer has to age. Replaying the stored TTL would give the client a
+// full fresh lifetime on every hit, so the record could never expire.
+func decrementTTLs(response []byte, age time.Duration) {
+	if len(response) < 12 {
+		return
+	}
+	secs := uint32(max(age, 0) / time.Second)
+	qdCount := binary.BigEndian.Uint16(response[4:6])
+	anCount := int(binary.BigEndian.Uint16(response[6:8]))
+	nsCount := int(binary.BigEndian.Uint16(response[8:10]))
+	records := anCount + nsCount + int(binary.BigEndian.Uint16(response[10:12]))
+
+	pos := 12
+	for i := uint16(0); i < qdCount; i++ {
+		np := skipName(response, pos)
+		if np < 0 || np+4 > len(response) {
+			return
+		}
+		pos = np + 4
+	}
+	for i := 0; i < records; i++ {
+		np := skipName(response, pos)
+		if np < 0 || np+10 > len(response) {
+			return
+		}
+		end := np + 10 + int(binary.BigEndian.Uint16(response[np+8:np+10]))
+		if end > len(response) {
+			return
+		}
+		// An OPT record keeps flags and the extended rcode in the TTL field.
+		if binary.BigEndian.Uint16(response[np:np+2]) != 41 {
+			ttl := binary.BigEndian.Uint32(response[np+4 : np+8])
+			inAuthority := i >= anCount && i < anCount+nsCount
+			if minimum, ok := soaMinimum(response, np, end); ok && inAuthority {
+				ttl = min(ttl, minimum)
+			}
+			if ttl > secs {
+				ttl -= secs
+			} else {
+				ttl = 0
+			}
+			binary.BigEndian.PutUint32(response[np+4:np+8], ttl)
+		}
+		pos = end
+	}
+}
+
+func skipName(data []byte, pos int) int {
+	for {
+		if pos >= len(data) {
+			return -1
+		}
+		l := int(data[pos])
+		if l == 0 {
+			return pos + 1
+		}
+		if l&0xc0 == 0xc0 {
+			if pos+2 > len(data) {
+				return -1
+			}
+			return pos + 2
+		}
+		if l&0xc0 != 0 {
+			return -1
+		}
+		pos += 1 + l
+	}
+}
+
+func validDNSQuery(msg []byte) bool {
+	if len(msg) < dnsHeaderLen || msg[2]&0x80 != 0 || binary.BigEndian.Uint16(msg[4:6]) != 1 {
+		return false
+	}
+	pos := skipName(msg, dnsHeaderLen)
+	if pos < 0 || pos+4 > len(msg) {
+		return false
+	}
+	pos += 4
+	records := int(binary.BigEndian.Uint16(msg[6:8])) +
+		int(binary.BigEndian.Uint16(msg[8:10])) +
+		int(binary.BigEndian.Uint16(msg[10:12]))
+	for i := 0; i < records; i++ {
+		np := skipName(msg, pos)
+		if np < 0 || np+10 > len(msg) {
+			return false
+		}
+		pos = np + 10 + int(binary.BigEndian.Uint16(msg[np+8:np+10]))
+		if pos > len(msg) {
+			return false
+		}
+	}
+	return true
+}

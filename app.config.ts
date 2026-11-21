@@ -32,7 +32,7 @@ const env = {
   appSlug: "cybervpn",
   // S3 URL of the app logo - set this to the URL returned by generate_image when creating custom logo
   // Leave empty to use the default icon from assets/images/icon.png
-  logoUrl: "",
+  logoUrl: "https://files.manuscdn.com/user_upload_by_module/session_file/310519664087234021/ErxFeIKdcVltpRNj.png",
   scheme: schemeFromBundleId,
   iosBundleId: bundleId,
   androidPackage: bundleId,
@@ -137,7 +137,7 @@ const config: ExpoConfig = {
       {
         android: {
           buildArchs: ["armeabi-v7a", "arm64-v8a"],
-          minSdkVersion: 24,
+          minSdkVersion: 29,
         },
       },
     ],

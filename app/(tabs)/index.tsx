@@ -4,6 +4,7 @@ import * as Clipboard from "expo-clipboard";
 import * as Linking from "expo-linking";
 import { ScreenContainer } from "@/components/screen-container";
 import { readCachedConfigs, refreshConfigs, type ServerConfig } from "@/lib/config-feed";
+import { connectVpn, disconnectVpn, readVpnStatus, type VpnState } from "@/lib/vpn-native";
 
 const CARD_NUMBER = "2202 2050 2451 1591";
 const COLORS = { bg: "#F4F8FC", ink: "#101D2D", muted: "#708095", blue: "#2386F4", pale: "#E7F2FF", line: "#E3EAF2", white: "#FFFFFF", green: "#198754" };
@@ -16,6 +17,8 @@ export default function HomeScreen() {
   const [feedError, setFeedError] = useState(false);
   const [supportVisible, setSupportVisible] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [vpnState, setVpnState] = useState<VpnState>("disconnected");
+  const [vpnError, setVpnError] = useState<string | null>(null);
 
   const updateFeed = useCallback(async () => {
     setRefreshing(true);
@@ -34,7 +37,61 @@ export default function HomeScreen() {
   }, []);
 
   useEffect(() => { void updateFeed(); }, [updateFeed]);
+  useEffect(() => {
+    if (Platform.OS !== "android") return;
+    let active = true;
+    const syncStatus = async () => {
+      try {
+        const status = await readVpnStatus();
+        if (active) {
+          setVpnState(status.state);
+          setVpnError(status.error ?? null);
+        }
+      } catch { /* Native status is retried on the next poll. */ }
+    };
+    void syncStatus();
+    const timer = setInterval(() => void syncStatus(), 1400);
+    return () => { active = false; clearInterval(timer); };
+  }, []);
   const currentServer = useMemo(() => servers.find((server) => server.id === selected), [servers, selected]);
+
+  const handleVpnToggle = async () => {
+    if (Platform.OS !== "android") {
+      Alert.alert("Только Android", "VPN-туннель доступен в приложении CyberVPN для Android.");
+      return;
+    }
+    if (vpnState === "disconnecting") return;
+    if (vpnState === "connected" || vpnState === "connecting" || vpnState === "reconnecting") {
+      setVpnState("disconnecting");
+      try { await disconnectVpn(); setVpnError(null); }
+      catch (error) { Alert.alert("Не удалось отключить VPN", error instanceof Error ? error.message : "Повторите попытку."); }
+      return;
+    }
+    if (!currentServer) {
+      Alert.alert("Нет серверов", "Сначала загрузите доступные конфигурации Hysteria2.");
+      return;
+    }
+    setVpnState("connecting");
+    setVpnError(null);
+    try { await connectVpn(currentServer.uri); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : "Проверьте конфигурацию и повторите попытку.";
+      setVpnState("error");
+      setVpnError(message);
+      Alert.alert("Не удалось подключиться", message);
+    }
+  };
+
+  const statusLabels: Record<VpnState, string> = {
+    disconnected: "ОТКЛЮЧЕНО",
+    connecting: "ПОДКЛЮЧЕНИЕ",
+    connected: "ПОДКЛЮЧЕНО",
+    reconnecting: "ВОССТАНОВЛЕНИЕ",
+    disconnecting: "ОТКЛЮЧЕНИЕ",
+    error: "ОШИБКА",
+  };
+  const active = vpnState === "connected" || vpnState === "connecting" || vpnState === "reconnecting" || vpnState === "disconnecting";
+  const statusColor = vpnState === "connected" ? COLORS.green : vpnState === "error" ? "#D9485F" : active ? COLORS.blue : COLORS.muted;
 
   const copyCard = async () => {
     await Clipboard.setStringAsync(CARD_NUMBER);
@@ -46,8 +103,6 @@ export default function HomeScreen() {
     try { await Linking.openURL("sberbankonline://"); }
     catch { Alert.alert("Сбер не найден", forSbp ? "Скопируйте номер карты и откройте СБП в приложении банка." : "Установите приложение Сбер или скопируйте номер карты."); }
   };
-  const showConnectionInfo = () => Alert.alert("VPN пока недоступен", "Для настоящего VPN-подключения требуется нативный Android VPN-модуль и Hysteria2-core. Сейчас приложение обновляет и показывает конфигурации, но не создаёт VPN-туннель.");
-
   return (
     <ScreenContainer containerClassName="bg-[#F4F8FC]">
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
@@ -58,35 +113,37 @@ export default function HomeScreen() {
         </View>
 
         <View style={styles.hero}>
-          <View style={styles.statusRow}><View style={[styles.statusDot, { backgroundColor: COLORS.muted }]} /><Text style={styles.statusText}>ОТКЛЮЧЕНО</Text></View>
-          <Pressable onPress={showConnectionInfo} style={({ pressed }) => [styles.powerButton, pressed && { opacity: 0.86 }]} accessibilityRole="button" accessibilityLabel="Подключить VPN">
-            <View style={styles.powerRing}><Text style={styles.powerGlyph}>⏻</Text></View>
+          <View style={styles.statusRow}><View style={[styles.statusDot, { backgroundColor: statusColor }]} /><Text style={[styles.statusText, { color: statusColor }]}>{statusLabels[vpnState]}</Text></View>
+          <Pressable onPress={() => void handleVpnToggle()} style={({ pressed }) => [styles.powerButton, pressed && { opacity: 0.86 }]} accessibilityRole="button" accessibilityLabel={active ? "Отключить VPN" : "Подключить VPN"}>
+            <View style={[styles.powerRing, vpnState === "connected" && { backgroundColor: COLORS.green }]}><Text style={styles.powerGlyph}>⏻</Text></View>
           </Pressable>
-          <Text style={styles.heroTitle}>Защищённое соединение</Text>
-          <Text style={styles.heroSub}>VPN-модуль Android пока не подключён</Text>
+          <Text style={styles.heroTitle}>{vpnState === "connected" ? "Защищённое соединение" : vpnState === "error" ? "Подключение не удалось" : "Подключиться к VPN"}</Text>
+          <Text style={styles.heroSub}>{vpnError ?? (vpnState === "connected" ? "Туннель Hysteria2 активен" : vpnState === "disconnecting" ? "Закрываем туннель…" : active ? "Ожидаем ответа сервера…" : "Нажмите, чтобы начать защищённое соединение")}</Text>
         </View>
 
         <View style={styles.sectionHead}><Text style={styles.sectionTitle}>Сервер</Text><Pressable onPress={() => void updateFeed()}><Text style={styles.blueText}>{refreshing ? "Проверяем…" : "Обновить"}</Text></Pressable></View>
-        <Pressable style={styles.serverCard} onPress={() => servers.length > 1 && Alert.alert("Выбор сервера", undefined, [...servers.map((s) => ({ text: s.name, onPress: () => setSelected(s.id) })), { text: "Отмена", style: "cancel" }])}>
+        <Pressable style={styles.serverCard} onPress={() => {
+          if (active) { Alert.alert("Сначала отключите VPN", "Чтобы сменить сервер, сначала остановите текущее соединение."); return; }
+          if (servers.length > 1) Alert.alert("Выбор сервера", undefined, [...servers.map((s) => ({ text: s.name, onPress: () => setSelected(s.id) })), { text: "Отмена", style: "cancel" }]);
+        }}>
           <View style={styles.flag}><Text style={{ fontSize: 18 }}>◉</Text></View>
           <View style={{ flex: 1 }}><Text style={styles.serverName}>{currentServer?.name ?? (refreshing ? "Загружаем список…" : "Нет доступных серверов")}</Text><Text style={styles.serverDetail}>{servers.length} {servers.length === 1 ? "сервер" : "серверов"} · Hysteria2</Text></View>
           {refreshing ? <ActivityIndicator color={COLORS.blue} /> : <Text style={styles.chevron}>›</Text>}
         </Pressable>
         <Text style={styles.feedNote}>{feedError ? "Не удалось проверить README. Показан сохранённый список, если он есть." : updatedAt ? `Список проверен ${updatedAt.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}` : "Источник: sociocyber1/txt · README.md"}</Text>
 
-        <View style={styles.supportCard}>
-          <View style={styles.supportIntro}><Text style={styles.heart}>♡</Text><View style={{ flex: 1 }}><Text style={styles.supportTitle}>Поддержать автора</Text><Text style={styles.supportSub}>Добровольно и без подписок</Text></View></View>
-          <Text style={styles.supportCopy}>Если вы считаете эту работу полезной — можно помочь деньгами. Коротко, без драматургии: автор делает всё сам, из своего кармана и бесплатно, а подписки, инструменты, сервера и время на них расходуются вполне материально.</Text>
-          <Pressable onPress={() => setSupportVisible(true)} style={styles.requisites} accessibilityRole="button"><View><Text style={styles.bankName}>Сбер · нажмите для действий</Text><Text style={styles.cardNumber}>{CARD_NUMBER}</Text></View><Text style={styles.chevron}>›</Text></Pressable>
-          {copied && <Text style={styles.copied}>Номер карты скопирован</Text>}
-        </View>
-        <Text style={styles.footnote}>Конфигурации загружаются из открытого репозитория. Подключение VPN станет доступно после добавления нативного Android-модуля.</Text>
+        <Pressable onPress={() => setSupportVisible(true)} style={styles.supportCard} accessibilityRole="button">
+          <View style={styles.supportIntro}><Text style={styles.heart}>♡</Text><View style={{ flex: 1 }}><Text style={styles.supportTitle}>Поддержать автора</Text><Text style={styles.supportSub}>Показать реквизиты</Text></View><Text style={styles.chevron}>›</Text></View>
+        </Pressable>
+        <Text style={styles.footnote}>Конфигурации обновляются из открытого репозитория. Для создания VPN Android запросит системное разрешение.</Text>
       </ScrollView>
 
       <Modal visible={supportVisible} transparent animationType="fade" onRequestClose={() => setSupportVisible(false)}>
         <Pressable style={styles.scrim} onPress={() => setSupportVisible(false)}>
           <Pressable style={styles.sheet} onPress={(event) => event.stopPropagation()}>
-            <View style={styles.handle} /><Text style={styles.sheetTitle}>Реквизиты Сбера</Text><Text style={styles.sheetCard}>{CARD_NUMBER}</Text>
+            <View style={styles.handle} /><Text style={styles.sheetTitle}>Поддержать автора</Text>
+            <Text style={styles.supportCopy}>Если вы считаете эту работу полезной — можно помочь деньгами. Коротко, без драматургии: автор делает всё сам, из своего кармана и бесплатно, а подписки, инструменты, сервера и время на них расходуются вполне материально.</Text>
+            <Text style={[styles.bankName, { marginTop: 14 }]}>Сбер</Text><Text style={styles.sheetCard}>{CARD_NUMBER}</Text>
             <Pressable style={styles.actionPrimary} onPress={() => void copyCard()}><Text style={styles.actionPrimaryText}>{copied ? "Номер скопирован" : "Скопировать номер карты"}</Text></Pressable>
             <Pressable style={styles.actionSecondary} onPress={() => void openSber()}><Text style={styles.actionSecondaryText}>Открыть приложение Сбер</Text></Pressable>
             <Pressable style={styles.actionSecondary} onPress={() => void openSber(true)}><Text style={styles.actionSecondaryText}>Открыть Сбер для СБП</Text></Pressable>

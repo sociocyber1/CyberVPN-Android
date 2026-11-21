@@ -1,0 +1,394 @@
+package golib
+
+import (
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"net"
+	"strings"
+	"syscall"
+	"time"
+	"unicode"
+
+	"github.com/apernet/hysteria/core/v2/client"
+	"github.com/apernet/hysteria/extras/v2/obfs"
+	"github.com/apernet/hysteria/extras/v2/transport/udphop"
+)
+
+const serverResolveTimeout = 3 * time.Second
+
+// Match upstream's defaults. Explicit profile values still take precedence;
+// QUIC negotiates the smaller idle timeout advertised by the two peers.
+const (
+	defaultMaxIdleTimeoutSec  = 30
+	defaultKeepAlivePeriodSec = 10
+)
+
+type clientConfig struct {
+	Server string `json:"server"`
+	Auth   string `json:"auth"`
+
+	TLSSni        string `json:"tls_sni"`
+	TLSInsecure   bool   `json:"tls_insecure"`
+	TLSPinSHA256  string `json:"tls_pin_sha256"`
+	TLSCA         string `json:"tls_ca"`
+	TLSClientCert string `json:"tls_client_cert"`
+	TLSClientKey  string `json:"tls_client_key"`
+	TLSECH        string `json:"tls_ech"`
+
+	ObfsType               string `json:"obfs_type"`
+	ObfsPassword           string `json:"obfs_password"`
+	ObfsGeckoMinPacketSize int    `json:"obfs_gecko_min_packet"`
+	ObfsGeckoMaxPacketSize int    `json:"obfs_gecko_max_packet"`
+
+	InitStreamReceiveWindow uint64 `json:"init_stream_receive_window"`
+	MaxStreamReceiveWindow  uint64 `json:"max_stream_receive_window"`
+	InitConnReceiveWindow   uint64 `json:"init_conn_receive_window"`
+	MaxConnReceiveWindow    uint64 `json:"max_conn_receive_window"`
+	MaxIdleTimeoutSec       int    `json:"max_idle_timeout"`
+	KeepAlivePeriodSec      int    `json:"keep_alive_period"`
+	DisablePathMTUDiscovery bool   `json:"disable_pmtud"`
+	DisableChromeParrot     bool   `json:"disable_chrome_parrot"`
+	DisableGSO              bool   `json:"disable_gso"`
+
+	CongestionType string `json:"congestion_type"`
+	BBRProfile     string `json:"bbr_profile"`
+
+	MaxTxMbps               int  `json:"max_tx_mbps"`
+	MaxRxMbps               int  `json:"max_rx_mbps"`
+	DisableLossCompensation bool `json:"disable_loss_compensation"`
+
+	HopIntervalSec    int `json:"hop_interval"`
+	MinHopIntervalSec int `json:"min_hop_interval"`
+	MaxHopIntervalSec int `json:"max_hop_interval"`
+
+	FastOpen bool `json:"fast_open"`
+	Lazy     bool `json:"lazy"`
+
+	RealmStunServers    []string `json:"realm_stun_servers"`
+	RealmStunTimeoutMs  int      `json:"realm_stun_timeout_ms"`
+	RealmPunchTimeoutMs int      `json:"realm_punch_timeout_ms"`
+	RealmInsecure       bool     `json:"realm_insecure"`
+}
+
+type connFactory struct {
+	session *Session
+	newFunc func(addr net.Addr) (net.PacketConn, error)
+	wrap    func(net.PacketConn) (net.PacketConn, error)
+}
+
+type trackedPacketConn struct {
+	net.PacketConn
+	session *Session
+}
+
+func (t *trackedPacketConn) Close() error {
+	t.session.unregisterActiveConn(t.PacketConn)
+	return t.PacketConn.Close()
+}
+
+func (t *trackedPacketConn) SyscallConn() (syscall.RawConn, error) {
+	if u, ok := t.PacketConn.(interface {
+		SyscallConn() (syscall.RawConn, error)
+	}); ok {
+		return u.SyscallConn()
+	}
+	return nil, errors.ErrUnsupported
+}
+
+func (t *trackedPacketConn) SetReadBuffer(bytes int) error {
+	if u, ok := t.PacketConn.(interface{ SetReadBuffer(int) error }); ok {
+		return u.SetReadBuffer(bytes)
+	}
+	return errors.ErrUnsupported
+}
+
+func (t *trackedPacketConn) SetWriteBuffer(bytes int) error {
+	if u, ok := t.PacketConn.(interface{ SetWriteBuffer(int) error }); ok {
+		return u.SetWriteBuffer(bytes)
+	}
+	return errors.ErrUnsupported
+}
+
+func buildCoreConfig(cfg *clientConfig, serverAddr net.Addr, session *Session) (*client.Config, error) {
+	coreConfig := &client.Config{
+		ServerAddr: serverAddr,
+		Auth:       cfg.Auth,
+		FastOpen:   cfg.FastOpen,
+	}
+	if err := applyClientOptions(coreConfig, cfg, ""); err != nil {
+		return nil, err
+	}
+	if err := setupConnFactory(coreConfig, cfg, serverAddr, session); err != nil {
+		return nil, err
+	}
+	return coreConfig, nil
+}
+
+// applyClientOptions fills everything except ServerAddr and ConnFactory, so
+// both the direct path and the realm path can share it. defaultSNI is used
+// when no explicit tls_sni is set (realm uses the rendezvous host).
+func applyClientOptions(coreConfig *client.Config, cfg *clientConfig, defaultSNI string) error {
+	if cfg.TLSSni != "" {
+		coreConfig.TLSConfig.ServerName = cfg.TLSSni
+	} else if defaultSNI != "" {
+		coreConfig.TLSConfig.ServerName = defaultSNI
+	}
+	coreConfig.TLSConfig.InsecureSkipVerify = cfg.TLSInsecure
+
+	pinned := cfg.TLSPinSHA256 != ""
+	if pinned {
+		pinHash := normalizeCertHash(cfg.TLSPinSHA256)
+		coreConfig.TLSConfig.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return errors.New("no certificates presented")
+			}
+			hash := sha256.Sum256(rawCerts[0])
+			hashHex := hex.EncodeToString(hash[:])
+			if hashHex == pinHash {
+				return nil
+			}
+			return errors.New("certificate does not match pinned hash")
+		}
+	}
+
+	customCA := cfg.TLSCA != ""
+	if customCA {
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM([]byte(cfg.TLSCA)) {
+			return fmt.Errorf("failed to parse CA PEM")
+		}
+		coreConfig.TLSConfig.RootCAs = pool
+	}
+
+	if (cfg.TLSClientCert != "") != (cfg.TLSClientKey != "") {
+		return fmt.Errorf("client cert and key must be set together")
+	}
+	mTLS := cfg.TLSClientCert != "" && cfg.TLSClientKey != ""
+	if mTLS {
+		cert, err := tls.X509KeyPair([]byte(cfg.TLSClientCert), []byte(cfg.TLSClientKey))
+		if err != nil {
+			return fmt.Errorf("parse client certificate: %w", err)
+		}
+		coreConfig.TLSConfig.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return &cert, nil
+		}
+	}
+
+	ech := cfg.TLSECH != ""
+	if ech {
+		list, err := parseECHConfigList(cfg.TLSECH)
+		if err != nil {
+			return fmt.Errorf("invalid ECH config list: %w", err)
+		}
+		coreConfig.TLSConfig.ECHConfigList = list
+	}
+
+	log(LogLevelInfo, srcTLS, "sni=%q insecure=%v pinned=%v custom-ca=%v mtls=%v ech=%v",
+		coreConfig.TLSConfig.ServerName, cfg.TLSInsecure, pinned, customCA, mTLS, ech)
+	log(LogLevelInfo, srcConfig, "auth=%s fast-open=%v",
+		authSummary(cfg.Auth), cfg.FastOpen)
+
+	coreConfig.QUICConfig = client.QUICConfig{
+		InitialStreamReceiveWindow:     cfg.InitStreamReceiveWindow,
+		MaxStreamReceiveWindow:         cfg.MaxStreamReceiveWindow,
+		InitialConnectionReceiveWindow: cfg.InitConnReceiveWindow,
+		MaxConnectionReceiveWindow:     cfg.MaxConnReceiveWindow,
+		DisablePathMTUDiscovery:        cfg.DisablePathMTUDiscovery,
+		DisableChromeParrot:            cfg.DisableChromeParrot,
+		DisableGSO:                     cfg.DisableGSO,
+	}
+	idleSec := cfg.MaxIdleTimeoutSec
+	if idleSec <= 0 {
+		idleSec = defaultMaxIdleTimeoutSec
+	}
+	coreConfig.QUICConfig.MaxIdleTimeout = time.Duration(idleSec) * time.Second
+
+	keepAliveSec := cfg.KeepAlivePeriodSec
+	if keepAliveSec <= 0 {
+		keepAliveSec = defaultKeepAlivePeriodSec
+	}
+	coreConfig.QUICConfig.KeepAlivePeriod = time.Duration(keepAliveSec) * time.Second
+
+	log(LogLevelInfo, srcTransport,
+		"QUIC: stream-recv=[%d,%d] conn-recv=[%d,%d] idle=%ds keepalive=%ds "+
+			"pmtud-disabled=%v parrot-disabled=%v gso-disabled=%v",
+		cfg.InitStreamReceiveWindow, cfg.MaxStreamReceiveWindow,
+		cfg.InitConnReceiveWindow, cfg.MaxConnReceiveWindow,
+		idleSec, keepAliveSec,
+		cfg.DisablePathMTUDiscovery, cfg.DisableChromeParrot, cfg.DisableGSO)
+
+	if cfg.CongestionType != "" {
+		coreConfig.CongestionConfig.Type = cfg.CongestionType
+		coreConfig.CongestionConfig.BBRProfile = cfg.BBRProfile
+		log(LogLevelInfo, srcTransport, "Congestion: type=%s bbr-profile=%q",
+			cfg.CongestionType, cfg.BBRProfile)
+	}
+
+	if cfg.MaxTxMbps > 0 {
+		coreConfig.BandwidthConfig.MaxTx = uint64(cfg.MaxTxMbps) * 125000
+	}
+	if cfg.MaxRxMbps > 0 {
+		coreConfig.BandwidthConfig.MaxRx = uint64(cfg.MaxRxMbps) * 125000
+	}
+	coreConfig.BandwidthConfig.DisableLossCompensation = cfg.DisableLossCompensation
+	if cfg.MaxTxMbps > 0 || cfg.MaxRxMbps > 0 {
+		log(LogLevelInfo, srcTransport, "Bandwidth caps: tx=%dMbps rx=%dMbps loss-compensation-disabled=%v",
+			cfg.MaxTxMbps, cfg.MaxRxMbps, cfg.DisableLossCompensation)
+	}
+
+	return nil
+}
+
+func authSummary(auth string) string {
+	if auth == "" {
+		return "absent"
+	}
+	return fmt.Sprintf("present (%d chars)", len(auth))
+}
+
+func x509AppendOK(pem string) bool {
+	pool := x509.NewCertPool()
+	return pool.AppendCertsFromPEM([]byte(pem))
+}
+
+func validateClientKeyPair(cert, key string) error {
+	_, err := tls.X509KeyPair([]byte(cert), []byte(key))
+	if err != nil {
+		return fmt.Errorf("invalid client key pair: %w", err)
+	}
+	return nil
+}
+
+func setupConnFactory(coreConfig *client.Config, cfg *clientConfig, serverAddr net.Addr, session *Session) error {
+	isHop := serverAddr.Network() == "udphop"
+	wrap, err := buildObfsWrapper(cfg)
+	if err != nil {
+		return err
+	}
+
+	listenUDP := func() (net.PacketConn, error) {
+		conn, err := net.ListenPacket("udp", "")
+		if err != nil {
+			return nil, err
+		}
+		if err := session.protectPacketConn(conn); err != nil {
+			_ = conn.Close()
+			log(LogLevelError, srcTransport, "Socket protection failed: %s", err)
+			return nil, err
+		}
+		return conn, nil
+	}
+
+	var newFunc func(addr net.Addr) (net.PacketConn, error)
+	if isHop {
+		if cfg.MinHopIntervalSec > 0 && cfg.MaxHopIntervalSec > 0 &&
+			cfg.MinHopIntervalSec > cfg.MaxHopIntervalSec {
+			return fmt.Errorf("min_hop_interval (%ds) exceeds max_hop_interval (%ds)",
+				cfg.MinHopIntervalSec, cfg.MaxHopIntervalSec)
+		}
+		hopAddr := serverAddr.(*udphop.UDPHopAddr)
+		hopInterval := buildHopInterval(cfg)
+		newFunc = func(addr net.Addr) (net.PacketConn, error) {
+			return udphop.NewUDPHopPacketConn(hopAddr, hopInterval, listenUDP)
+		}
+		log(LogLevelInfo, srcTransport,
+			"UDP port hopping: addr=%s interval=[%s,%s]",
+			hopAddr.String(), hopInterval.Min, hopInterval.Max)
+	} else {
+		newFunc = func(addr net.Addr) (net.PacketConn, error) {
+			return listenUDP()
+		}
+	}
+
+	coreConfig.ConnFactory = &connFactory{
+		session: session,
+		newFunc: newFunc,
+		wrap:    wrap,
+	}
+	return nil
+}
+
+func buildObfsWrapper(cfg *clientConfig) (func(net.PacketConn) (net.PacketConn, error), error) {
+	obfsType := strings.ToLower(cfg.ObfsType)
+	switch obfsType {
+	case "", "plain":
+		return nil, nil
+	case "salamander":
+		if cfg.ObfsPassword == "" {
+			return nil, fmt.Errorf("obfs password is required for salamander")
+		}
+		psk := []byte(cfg.ObfsPassword)
+		log(LogLevelInfo, srcTransport, "Obfuscation: salamander")
+		return func(conn net.PacketConn) (net.PacketConn, error) {
+			return obfs.WrapPacketConnSalamander(conn, psk)
+		}, nil
+	case "gecko":
+		if cfg.ObfsPassword == "" {
+			return nil, fmt.Errorf("obfs password is required for gecko")
+		}
+		opts := obfs.GeckoOptions{
+			Password:      []byte(cfg.ObfsPassword),
+			MinPacketSize: cfg.ObfsGeckoMinPacketSize,
+			MaxPacketSize: cfg.ObfsGeckoMaxPacketSize,
+		}
+		log(LogLevelInfo, srcTransport, "Obfuscation: gecko (packet=[%d,%d])",
+			opts.MinPacketSize, opts.MaxPacketSize)
+		return func(conn net.PacketConn) (net.PacketConn, error) {
+			return obfs.WrapPacketConnGecko(conn, opts)
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported obfs type %q", cfg.ObfsType)
+	}
+}
+
+func (f *connFactory) New(addr net.Addr) (net.PacketConn, error) {
+	conn, err := f.newFunc(addr)
+	if err != nil {
+		return nil, err
+	}
+	tracked := &trackedPacketConn{PacketConn: conn, session: f.session}
+	f.session.registerActiveConn(conn)
+	if f.wrap != nil {
+		wrapped, err := f.wrap(tracked)
+		if err != nil {
+			_ = tracked.Close()
+			return nil, err
+		}
+		return wrapped, nil
+	}
+	return tracked, nil
+}
+
+func buildHopInterval(cfg *clientConfig) udphop.HopIntervalConfig {
+	if cfg.MinHopIntervalSec > 0 && cfg.MaxHopIntervalSec > 0 {
+		return udphop.HopIntervalConfig{
+			Min: time.Duration(cfg.MinHopIntervalSec) * time.Second,
+			Max: time.Duration(cfg.MaxHopIntervalSec) * time.Second,
+		}
+	}
+	if cfg.HopIntervalSec > 0 {
+		d := time.Duration(cfg.HopIntervalSec) * time.Second
+		return udphop.HopIntervalConfig{Min: d, Max: d}
+	}
+	return udphop.HopIntervalConfig{
+		Min: 30 * time.Second,
+		Max: 30 * time.Second,
+	}
+}
+
+func isPortHopping(port string) bool {
+	return strings.Contains(port, "-") || strings.Contains(port, ",")
+}
+
+func normalizeCertHash(hash string) string {
+	return strings.ToLower(strings.Map(func(r rune) rune {
+		if r == ':' || unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, hash))
+}
