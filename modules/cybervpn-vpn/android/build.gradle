@@ -21,10 +21,14 @@ version = '1.0.0'
 
 android {
   namespace 'expo.modules.cybervpn'
+  buildFeatures {
+    buildConfig true
+  }
   defaultConfig {
     minSdk 29
     versionCode 1
     versionName '1.0.0'
+    buildConfigField 'String', 'CORE_VERSION', '"' + file('hysteria-upstream-commit.txt').text.trim() + '"'
     consumerProguardFiles 'consumer-rules.pro'
   }
   compileOptions {
