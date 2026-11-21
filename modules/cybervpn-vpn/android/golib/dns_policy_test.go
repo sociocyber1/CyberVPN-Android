@@ -29,6 +29,35 @@ func TestDNSPolicy_NormalizesIDNA(t *testing.T) {
 	}
 }
 
+func TestDNSPolicy_SuffixMatchUsesLabelBoundariesAndMostSpecificRule(t *testing.T) {
+	p, err := newDNSPolicy([]directDomainRule{
+		{ID: "tld", Name: ".ru"},
+		{ID: "specific", Name: "*.example.ru"},
+	}, "enabled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name, want string
+	}{
+		{name: "ru", want: "tld"},
+		{name: "example.ru", want: "tld"},
+		{name: "www.example.ru", want: "specific"},
+		{name: "notru", want: ""},
+		{name: "example.rust", want: ""},
+	}
+	for _, tt := range tests {
+		got, ok := p.directRuleFor(dnsQuery(tt.name))
+		if tt.want == "" {
+			if ok {
+				t.Errorf("%q unexpectedly matched %q", tt.name, got)
+			}
+		} else if !ok || got != tt.want {
+			t.Errorf("%q -> (%q, %v), want (%q, true)", tt.name, got, ok, tt.want)
+		}
+	}
+}
+
 func TestDNSPolicy_BypassOnlyRoutesAAAAToDirect(t *testing.T) {
 	p, err := newDNSPolicy(nil, "bypass_only")
 	if err != nil {

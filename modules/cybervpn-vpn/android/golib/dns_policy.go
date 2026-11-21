@@ -13,24 +13,40 @@ type directDomainRule struct {
 }
 
 type dnsPolicy struct {
-	directDomains map[string]string
-	ipv6Mode      string
+	directDomains  map[string]string
+	directSuffixes map[string]string
+	ipv6Mode       string
 }
 
 func newDNSPolicy(rules []directDomainRule, ipv6Mode string) (*dnsPolicy, error) {
-	p := &dnsPolicy{directDomains: make(map[string]string, len(rules)), ipv6Mode: ipv6Mode}
+	p := &dnsPolicy{
+		directDomains:  make(map[string]string, len(rules)),
+		directSuffixes: make(map[string]string, len(rules)),
+		ipv6Mode:       ipv6Mode,
+	}
 	for _, rule := range rules {
-		name, err := normalizeDNSName(rule.Name)
+		rawName := strings.TrimSpace(rule.Name)
+		suffix := false
+		if strings.HasPrefix(rawName, "*.") {
+			rawName, suffix = strings.TrimPrefix(rawName, "*."), true
+		} else if strings.HasPrefix(rawName, ".") {
+			rawName, suffix = strings.TrimPrefix(rawName, "."), true
+		}
+		name, err := normalizeDNSName(rawName)
 		if err != nil {
 			return nil, fmt.Errorf("invalid direct DNS domain %q: %w", rule.Name, err)
 		}
 		if rule.ID == "" {
 			return nil, fmt.Errorf("direct DNS domain %q has no rule ID", rule.Name)
 		}
-		if existing, ok := p.directDomains[name]; ok && existing != rule.ID {
+		destination := p.directDomains
+		if suffix {
+			destination = p.directSuffixes
+		}
+		if existing, ok := destination[name]; ok && existing != rule.ID {
 			return nil, fmt.Errorf("duplicate direct DNS domain %q", name)
 		}
-		p.directDomains[name] = rule.ID
+		destination[name] = rule.ID
 	}
 	return p, nil
 }
@@ -48,8 +64,18 @@ func (p *dnsPolicy) directRuleFor(query []byte) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	ruleID, found := p.directDomains[name]
-	return ruleID, found
+	if ruleID, found := p.directDomains[name]; found {
+		return ruleID, true
+	}
+	bestLength := -1
+	bestRule := ""
+	for suffix, ruleID := range p.directSuffixes {
+		if (name == suffix || strings.HasSuffix(name, "."+suffix)) && len(suffix) > bestLength {
+			bestLength = len(suffix)
+			bestRule = ruleID
+		}
+	}
+	return bestRule, bestLength >= 0
 }
 
 func dnsQuestionName(query []byte) (string, bool) {

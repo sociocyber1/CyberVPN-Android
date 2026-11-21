@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, Alert, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Alert, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import * as Linking from "expo-linking";
 import { ScreenContainer } from "@/components/screen-container";
 import { readCachedConfigs, refreshConfigs, type ServerConfig } from "@/lib/config-feed";
-import { connectVpn, disconnectVpn, readVpnStatus, type VpnState } from "@/lib/vpn-native";
-import { BANK_CARD_NUMBER, ORGANIZATION_NAME, PROJECT_YOUTUBE_URL, copyBankCardNumber, openSupportDestination } from "@/lib/support-info";
+import { connectVpn, disconnectVpn, readVpnStatus, updateNoToVpnDomains, type VpnState } from "@/lib/vpn-native";
+import { DEFAULT_NO_TO_VPN_SETTINGS, MAX_NO_TO_VPN_RULES, loadNoToVpnSettings, parseDomainSuffixes, parseNoToVpnSites, saveNoToVpnSettings } from "@/lib/no-to-vpn";
+import { DEFAULT_VPN_DNS_SETTINGS, loadVpnDnsSettings, parseVpnDnsServers, saveVpnDnsSettings, type VpnDnsTransport } from "@/lib/dns-settings";
+import { noToVpnStyles } from "@/lib/no-to-vpn-styles";
+import { COUNTRY_TLD_PRESET } from "@/lib/country-tld-presets";
+import { BANK_CARD_NUMBER, ORGANIZATION_NAME, PROJECT_YOUTUBE_URL, SOCIOCYBERNEERING_VIDEO_URL, copyBankCardNumber, openSupportDestination } from "@/lib/support-info";
 
 const COLORS = { bg: "#F4F8FC", ink: "#101D2D", muted: "#708095", blue: "#2386F4", pale: "#E7F2FF", line: "#E3EAF2", white: "#FFFFFF", green: "#198754" };
 
@@ -21,6 +25,19 @@ export default function HomeScreen() {
   const [copied, setCopied] = useState(false);
   const [vpnState, setVpnState] = useState<VpnState>("disconnected");
   const [vpnError, setVpnError] = useState<string | null>(null);
+  const [noToVpnSettings, setNoToVpnSettings] = useState(DEFAULT_NO_TO_VPN_SETTINGS);
+  const [vpnDns, setVpnDns] = useState(DEFAULT_VPN_DNS_SETTINGS);
+  const [vpnDnsInput, setVpnDnsInput] = useState(DEFAULT_VPN_DNS_SETTINGS.servers.join(", "));
+  const [vpnDnsLoaded, setVpnDnsLoaded] = useState(false);
+  const [vpnDnsBusy, setVpnDnsBusy] = useState(false);
+  const [vpnDnsError, setVpnDnsError] = useState<string | null>(null);
+  const [vpnDnsNotice, setVpnDnsNotice] = useState<string | null>(null);
+  const [noToVpnInput, setNoToVpnInput] = useState(DEFAULT_NO_TO_VPN_SETTINGS.suffixes.join(", "));
+  const [noToVpnSiteInput, setNoToVpnSiteInput] = useState(DEFAULT_NO_TO_VPN_SETTINGS.sites.join(", "));
+  const [noToVpnLoaded, setNoToVpnLoaded] = useState(false);
+  const [noToVpnBusy, setNoToVpnBusy] = useState(false);
+  const [noToVpnError, setNoToVpnError] = useState<string | null>(null);
+  const [noToVpnNotice, setNoToVpnNotice] = useState<string | null>(null);
 
   const updateFeed = useCallback(async () => {
     setRefreshing(true);
@@ -58,7 +75,95 @@ export default function HomeScreen() {
     const timer = setInterval(() => void syncStatus(), 1400);
     return () => { active = false; clearInterval(timer); };
   }, []);
+  useEffect(() => {
+    let active = true;
+    void loadVpnDnsSettings().then((settings) => { if (active) { setVpnDns(settings); setVpnDnsInput(settings.servers.join(", ")); setVpnDnsLoaded(true); } });
+    return () => { active = false; };
+  }, []);
+  useEffect(() => {
+    let active = true;
+    void loadNoToVpnSettings().then((settings) => {
+      if (active) {
+        setNoToVpnSettings(settings);
+        setNoToVpnInput(settings.suffixes.join(", "));
+        setNoToVpnSiteInput(settings.sites.join(", "));
+        setNoToVpnLoaded(true);
+      }
+    });
+    return () => { active = false; };
+  }, []);
   const currentServer = useMemo(() => servers.find((server) => server.id === selected), [servers, selected]);
+
+  const applyVpnDnsSettings = async () => {
+    const parsed = parseVpnDnsServers(vpnDnsInput, vpnDns.transport);
+    if (!parsed.ok) { setVpnDnsError(parsed.error); setVpnDnsNotice(null); return; }
+    setVpnDnsBusy(true); setVpnDnsError(null); setVpnDnsNotice(null);
+    try {
+      const next = { transport: vpnDns.transport, servers: parsed.servers };
+      await saveVpnDnsSettings(next);
+      setVpnDns(next); setVpnDnsInput(next.servers.join(", "));
+      setVpnDnsNotice(vpnState === "connected" ? "DNS сохранён; переподключитесь, чтобы применить его к Go-ядру." : "DNS сохранён и будет применён при следующем подключении.");
+    } catch (error) { setVpnDnsError(error instanceof Error ? error.message : "Не удалось сохранить DNS."); }
+    finally { setVpnDnsBusy(false); }
+  };
+
+  const applyNoToVpnSettings = async (enabled: boolean, savedMessage = "Исключения сохранены.") => {
+    if (!noToVpnLoaded) {
+      setNoToVpnError("Параметры NoToVPN ещё загружаются. Повторите через мгновение.");
+      return;
+    }
+    const parsed = parseDomainSuffixes(noToVpnInput);
+    if (!parsed.ok) {
+      setNoToVpnError(parsed.error);
+      setNoToVpnNotice(null);
+      return;
+    }
+    const parsedSites = parseNoToVpnSites(noToVpnSiteInput);
+    if (!parsedSites.ok) { setNoToVpnError(parsedSites.error); setNoToVpnNotice(null); return; }
+    if (new Set([...parsed.suffixes, ...parsedSites.domains]).size > MAX_NO_TO_VPN_RULES) {
+      setNoToVpnError(`Можно сохранить не более ${MAX_NO_TO_VPN_RULES} правил NoToVPN суммарно.`);
+      setNoToVpnNotice(null);
+      return;
+    }
+    if (enabled && parsed.suffixes.length + parsedSites.domains.length === 0) {
+      setNoToVpnError("Для включения NoToVPN добавьте хотя бы одну зону или сайт.");
+      setNoToVpnNotice(null);
+      return;
+    }
+
+    const previous = noToVpnSettings;
+    const next = { enabled, suffixes: parsed.suffixes, sites: parsedSites.domains };
+    const rules = [...parsed.suffixes, ...parsedSites.domains];
+    const updateRunningTunnel = Platform.OS === "android" && vpnState === "connected";
+    setNoToVpnBusy(true);
+    setNoToVpnError(null);
+    setNoToVpnNotice(null);
+    try {
+      if (updateRunningTunnel) {
+        await updateNoToVpnDomains(enabled ? rules : []);
+      }
+      try {
+        await saveNoToVpnSettings(next);
+      } catch (error) {
+        if (updateRunningTunnel) {
+          await updateNoToVpnDomains(previous.enabled ? [...previous.suffixes, ...previous.sites] : []).catch(() => undefined);
+        }
+        throw error;
+      }
+      setNoToVpnSettings(next);
+      setNoToVpnInput(parsed.suffixes.join(", "));
+      setNoToVpnSiteInput(parsedSites.domains.join(", "));
+      setNoToVpnNotice(enabled && updateRunningTunnel
+        ? "NoToVPN включён: активный TUN обновлён."
+        : enabled
+          ? "NoToVPN включён; правила применятся при подключении VPN."
+          : "NoToVPN выключен.");
+    } catch (error) {
+      setNoToVpnError(error instanceof Error ? error.message : "Не удалось применить настройки NoToVPN.");
+    } finally {
+      setNoToVpnBusy(false);
+    }
+  };
 
   const handleVpnToggle = async () => {
     if (Platform.OS !== "android") {
@@ -76,9 +181,36 @@ export default function HomeScreen() {
       Alert.alert("Нет серверов", "Сначала загрузите доступные конфигурации Hysteria2.");
       return;
     }
+    if (!noToVpnLoaded) {
+      setNoToVpnError("Параметры NoToVPN ещё загружаются. Повторите через мгновение.");
+      return;
+    }
+    const parsedSuffixes = parseDomainSuffixes(noToVpnInput);
+    if (!parsedSuffixes.ok) {
+      setNoToVpnError(parsedSuffixes.error);
+      return;
+    }
+    const parsedSites = parseNoToVpnSites(noToVpnSiteInput);
+    if (!parsedSites.ok) { setNoToVpnError(parsedSites.error); return; }
+    if (new Set([...parsedSuffixes.suffixes, ...parsedSites.domains]).size > MAX_NO_TO_VPN_RULES) {
+      setNoToVpnError(`Можно сохранить не более ${MAX_NO_TO_VPN_RULES} правил NoToVPN суммарно.`);
+      return;
+    }
+    if (noToVpnSettings.enabled && parsedSuffixes.suffixes.length + parsedSites.domains.length === 0) {
+      setNoToVpnError("Для включения NoToVPN добавьте хотя бы одну зону или сайт.");
+      return;
+    }
     setVpnState("connecting");
     setVpnError(null);
-    try { await connectVpn(currentServer.uri); }
+    try {
+      const nextSettings = { ...noToVpnSettings, suffixes: parsedSuffixes.suffixes, sites: parsedSites.domains };
+      await saveNoToVpnSettings(nextSettings);
+      setNoToVpnSettings(nextSettings);
+      setNoToVpnInput(parsedSuffixes.suffixes.join(", "));
+      setNoToVpnSiteInput(parsedSites.domains.join(", "));
+      const dns = await loadVpnDnsSettings();
+      await connectVpn(currentServer.uri, noToVpnSettings.enabled ? [...parsedSuffixes.suffixes, ...parsedSites.domains] : [], dns);
+    }
     catch (error) {
       const message = error instanceof Error ? error.message : "Проверьте конфигурацию и повторите попытку.";
       setVpnState("error");
@@ -123,6 +255,11 @@ export default function HomeScreen() {
     try { await openSupportDestination("project", (url) => Linking.openURL(url)); }
     catch { setProjectNotice(`Не удалось открыть ссылку. Откройте вручную: ${PROJECT_YOUTUBE_URL}`); }
   };
+  const openOrganizationVideo = async () => {
+    setProjectNotice(null);
+    try { await Linking.openURL(SOCIOCYBERNEERING_VIDEO_URL); }
+    catch { setProjectNotice(`Не удалось открыть ссылку. Откройте вручную: ${SOCIOCYBERNEERING_VIDEO_URL}`); }
+  };
   return (
     <ScreenContainer containerClassName="bg-[#F4F8FC]">
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
@@ -161,7 +298,87 @@ export default function HomeScreen() {
           <Pressable onPress={() => void openProject()} style={[styles.actionSecondary, { marginTop: 12, marginBottom: 0 }]} accessibilityRole="link">
             <Text style={styles.actionSecondaryText}>Материалы о проекте на YouTube</Text>
           </Pressable>
+          <Pressable onPress={() => void openOrganizationVideo()} style={styles.actionSecondary} accessibilityRole="link">
+            <Text style={styles.actionSecondaryText}>SocioCyberneering Inc. · видео с 22:42</Text>
+          </Pressable>
           {projectNotice ? <Text style={[styles.footnote, { color: "#D9485F" }]}>{projectNotice}</Text> : null}
+        </View>
+        <View style={[styles.supportCard, { marginTop: 12 }]}>
+          <Text style={styles.sectionTitle}>DNS через VPN</Text>
+          <Text style={[noToVpnStyles.description, { marginTop: 5 }]}>Обычные DNS-запросы идут через Hysteria-туннель к Go-ядру; прямого DNS fallback здесь нет.</Text>
+          <View style={{ flexDirection: "row", gap: 6, marginTop: 12 }}>
+            {(["udp", "tcp", "tls", "https"] as VpnDnsTransport[]).map((transport) => (
+              <Pressable key={transport} onPress={() => { setVpnDns((current) => ({ ...current, transport })); setVpnDnsError(null); }} disabled={!vpnDnsLoaded || vpnDnsBusy || active} style={{ flex: 1, paddingVertical: 9, borderRadius: 10, alignItems: "center", backgroundColor: vpnDns.transport === transport ? COLORS.pale : "#F4F8FC", borderWidth: 1, borderColor: vpnDns.transport === transport ? COLORS.blue : COLORS.line }}>
+                <Text style={{ color: vpnDns.transport === transport ? COLORS.blue : COLORS.muted, fontSize: 11, fontWeight: "700" }}>{transport === "tls" ? "DoT" : transport === "https" ? "DoH" : transport.toUpperCase()}</Text>
+              </Pressable>
+            ))}
+          </View>
+          <TextInput value={vpnDnsInput} onChangeText={(value) => { setVpnDnsInput(value); setVpnDnsError(null); setVpnDnsNotice(null); }} editable={vpnDnsLoaded && !vpnDnsBusy && !active} placeholder={vpnDns.transport === "https" ? "https://dns.google/dns-query" : vpnDns.transport === "tls" ? "dns.google, one.one.one.one" : "8.8.8.8, 8.8.4.4"} placeholderTextColor="#9AA7B7" multiline autoCapitalize="none" autoCorrect={false} style={noToVpnStyles.input} accessibilityLabel="Серверы DNS, используемые в VPN-туннеле" />
+          <Pressable onPress={() => void applyVpnDnsSettings()} disabled={!vpnDnsLoaded || vpnDnsBusy || active} style={({ pressed }) => [noToVpnStyles.saveButton, pressed && { opacity: 0.8 }, (!vpnDnsLoaded || vpnDnsBusy || active) && { opacity: 0.5 }]} accessibilityRole="button">
+            {vpnDnsBusy ? <ActivityIndicator color={COLORS.blue} /> : <Text style={noToVpnStyles.saveText}>Сохранить DNS</Text>}
+          </Pressable>
+          {vpnDnsError ? <Text style={noToVpnStyles.error}>{vpnDnsError}</Text> : null}
+          {vpnDnsNotice ? <Text style={noToVpnStyles.notice}>{vpnDnsNotice}</Text> : null}
+        </View>
+        <View style={[styles.supportCard, { marginTop: 12 }]}>
+          <View style={noToVpnStyles.header}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.sectionTitle}>NoToVPN</Text>
+              <Text style={noToVpnStyles.description}>Не отправлять выбранные доменные зоны через Hysteria2.</Text>
+            </View>
+            <Switch
+              value={noToVpnSettings.enabled}
+              onValueChange={(enabled) => void applyNoToVpnSettings(enabled)}
+              disabled={!noToVpnLoaded || noToVpnBusy || !["disconnected", "connected", "error"].includes(vpnState)}
+              trackColor={{ false: "#D4DDE8", true: "#91C6FF" }}
+              thumbColor={noToVpnSettings.enabled ? COLORS.blue : "#FFFFFF"}
+              accessibilityLabel="Включить или выключить NoToVPN"
+            />
+          </View>
+          <Pressable onPress={() => { setNoToVpnInput([...new Set([...noToVpnInput.split(/[\s,;]+/u).filter(Boolean), ...COUNTRY_TLD_PRESET])].join(", ")); setNoToVpnError(null); }} style={[noToVpnStyles.saveButton, { marginTop: 8 }]} accessibilityRole="button">
+            <Text style={noToVpnStyles.saveText}>Добавить все зоны стран и территорий ({COUNTRY_TLD_PRESET.length})</Text>
+          </Pressable>
+          <TextInput
+            value={noToVpnInput}
+            onChangeText={(value) => { setNoToVpnInput(value); setNoToVpnError(null); setNoToVpnNotice(null); }}
+            editable={noToVpnLoaded && !noToVpnBusy && ["disconnected", "connected", "error"].includes(vpnState)}
+            placeholder="Например: .ru, .kz, .eu"
+            placeholderTextColor="#9AA7B7"
+            multiline
+            autoCapitalize="none"
+            autoCorrect={false}
+            style={noToVpnStyles.input}
+            accessibilityLabel="Доменные суффиксы для обхода VPN"
+          />
+          <Text style={[noToVpnStyles.description, { marginTop: 12 }]}>NoToVPN List · отдельные сайты (без https:// и пути; *.site.ru включает поддомены)</Text>
+          <TextInput
+            value={noToVpnSiteInput}
+            onChangeText={(value) => { setNoToVpnSiteInput(value); setNoToVpnError(null); setNoToVpnNotice(null); }}
+            editable={noToVpnLoaded && !noToVpnBusy && ["disconnected", "connected", "error"].includes(vpnState)}
+            placeholder="gosuslugi.ru, nalog.gov.ru"
+            placeholderTextColor="#9AA7B7"
+            multiline
+            autoCapitalize="none"
+            autoCorrect={false}
+            style={noToVpnStyles.input}
+            accessibilityLabel="Точные сайты для обхода VPN"
+          />
+          <Pressable
+            onPress={() => void applyNoToVpnSettings(noToVpnSettings.enabled)}
+            disabled={!noToVpnLoaded || noToVpnBusy || !["disconnected", "connected", "error"].includes(vpnState)}
+            style={({ pressed }) => [noToVpnStyles.saveButton, pressed && { opacity: 0.8 }, (!noToVpnLoaded || noToVpnBusy) && { opacity: 0.5 }]}
+            accessibilityRole="button"
+          >
+            {noToVpnBusy ? <ActivityIndicator color={COLORS.blue} /> : <Text style={noToVpnStyles.saveText}>Сохранить исключения</Text>}
+          </Pressable>
+          <Text style={noToVpnStyles.helper}>
+            Для выбранных доменов DNS-запросы идут напрямую через DNS физической сети; при активном Android Private DNS используется DoT, если имя сервера доступно, иначе — зашифрованный DoH. Ответы A/AAAA дают IP для прямой TCP/UDP-маршрутизации. DNS-провайдер видит эти запросы.
+          </Text>
+          <Text style={noToVpnStyles.warning}>
+            Маршрут выбирается по IP из DNS-ответа: общий CDN-IP может временно обходить VPN и для других доменов до истечения TTL. Приложения с собственным DoH могут не раскрыть домен. Это не строгий доменный firewall.
+          </Text>
+          {noToVpnError ? <Text style={noToVpnStyles.error}>{noToVpnError}</Text> : null}
+          {noToVpnNotice ? <Text style={noToVpnStyles.notice}>{noToVpnNotice}</Text> : null}
         </View>
         <Text style={styles.footnote}>Конфигурации обновляются из открытого репозитория. Для создания VPN Android запросит системное разрешение.</Text>
       </ScrollView>

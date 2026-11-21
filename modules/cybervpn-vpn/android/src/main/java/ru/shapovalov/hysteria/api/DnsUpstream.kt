@@ -34,6 +34,6 @@ data class DnsUpstream(
     }
 
     companion object {
-        val Default: DnsUpstream = DnsUpstream(DnsTransport.Tcp, listOf("1.1.1.1:53", "1.0.0.1:53"))
+        val Default: DnsUpstream = DnsUpstream(DnsTransport.Udp, listOf("8.8.8.8", "8.8.4.4"))
     }
 }

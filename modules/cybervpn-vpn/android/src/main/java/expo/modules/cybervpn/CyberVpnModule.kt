@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import androidx.core.content.ContextCompat
+import org.json.JSONArray
 import expo.modules.kotlin.activityresult.AppContextActivityResultContract
 import expo.modules.kotlin.activityresult.AppContextActivityResultLauncher
 import expo.modules.kotlin.functions.Coroutine
@@ -29,11 +30,18 @@ class CyberVpnModule : Module() {
       )
     }
 
-    AsyncFunction("connect") Coroutine { configUri: String ->
+    AsyncFunction("connect") Coroutine { configUri: String, bypassDomains: List<String>, dnsTransport: String, dnsServers: List<String> ->
       val context = requireNotNull(appContext.reactContext) { "Приложение уже закрыто" }
       require(configUri.startsWith("hy2://") || configUri.startsWith("hysteria2://")) {
         "Выбранная конфигурация не является ссылкой Hysteria2"
       }
+      val normalizedDomains = NoToVpnDomains.normalize(bypassDomains)
+      val normalizedDns = VpnDnsSettings.normalize(dnsTransport, dnsServers)
+      context.getSharedPreferences(CyberVpnService.PREFERENCES, Context.MODE_PRIVATE).edit()
+        .putString(CyberVpnService.KEY_BYPASS_DOMAINS, JSONArray(normalizedDomains).toString())
+        .putString(CyberVpnService.KEY_DNS_TRANSPORT, normalizedDns.first)
+        .putString(CyberVpnService.KEY_DNS_SERVERS, JSONArray(normalizedDns.second).toString())
+        .apply()
 
       if (VpnService.prepare(context) != null) {
         val approved = permissionLauncher.launch(configUri)
@@ -43,7 +51,28 @@ class CyberVpnModule : Module() {
       val serviceIntent = Intent(context, CyberVpnService::class.java)
         .setAction(CyberVpnService.ACTION_CONNECT)
         .putExtra(CyberVpnService.EXTRA_CONFIG_URI, configUri)
+        .putStringArrayListExtra(CyberVpnService.EXTRA_BYPASS_DOMAINS, ArrayList(normalizedDomains))
+        .putExtra(CyberVpnService.EXTRA_DNS_TRANSPORT, normalizedDns.first)
+        .putStringArrayListExtra(CyberVpnService.EXTRA_DNS_SERVERS, ArrayList(normalizedDns.second))
       ContextCompat.startForegroundService(context, serviceIntent)
+      readStatus(context)
+    }
+
+    AsyncFunction("setBypassDomains") Coroutine { domains: List<String> ->
+      val context = requireNotNull(appContext.reactContext) { "Приложение уже закрыто" }
+      val normalizedDomains = NoToVpnDomains.normalize(domains)
+      val preferences = context.getSharedPreferences(CyberVpnService.PREFERENCES, Context.MODE_PRIVATE)
+      val currentState = preferences.getString(CyberVpnService.KEY_STATE, CyberVpnService.STATE_DISCONNECTED)
+      if (currentState == CyberVpnService.STATE_CONNECTED) {
+        val service = CyberVpnService.runningInstance
+          ?: throw IllegalStateException("Служба VPN недоступна для обновления правил")
+        service.updateBypassDomains(normalizedDomains)
+      } else if (currentState in listOf(CyberVpnService.STATE_CONNECTING, CyberVpnService.STATE_RECONNECTING)) {
+        throw IllegalStateException("Дождитесь завершения подключения перед изменением NoToVPN")
+      }
+      preferences.edit()
+        .putString(CyberVpnService.KEY_BYPASS_DOMAINS, JSONArray(normalizedDomains).toString())
+        .apply()
       readStatus(context)
     }
 

@@ -6,7 +6,8 @@ export type NativeVpnState = {
 };
 
 type CyberVpnNativeModule = {
-  connect(configUri: string): Promise<NativeVpnState>;
+  connect(configUri: string, bypassDomains: string[], dnsTransport: string, dnsServers: string[]): Promise<NativeVpnState>;
+  setBypassDomains(domains: string[]): Promise<NativeVpnState>;
   disconnect(): Promise<NativeVpnState>;
   getStatus(): NativeVpnState;
 };

@@ -3,6 +3,7 @@ export const BANK_CARD_NUMBER = "2202 2081 1034 0461";
 export const AUTHOR_EMAIL = "sociocyber1@gmail.com";
 export const TELEGRAM_HANDLE = "@sc_sinus";
 export const PROJECT_YOUTUBE_URL = "https://www.youtube.com/@JacqueFrescoRU";
+export const SOCIOCYBERNEERING_VIDEO_URL = "https://youtu.be/258cx_PsrRA?t=1362";
 
 export const SUPPORT_DESTINATIONS = {
   email: `mailto:${AUTHOR_EMAIL}`,

@@ -4,6 +4,7 @@ import {
   BANK_CARD_NUMBER,
   ORGANIZATION_NAME,
   PROJECT_YOUTUBE_URL,
+  SOCIOCYBERNEERING_VIDEO_URL,
   SUPPORT_DESTINATIONS,
   TELEGRAM_HANDLE,
   copyBankCardNumber,
@@ -23,6 +24,7 @@ describe("CyberVPN support and project details", () => {
     expect(SUPPORT_DESTINATIONS.telegram).toBe("https://t.me/sc_sinus");
     expect(SUPPORT_DESTINATIONS.project).toBe("https://www.youtube.com/@JacqueFrescoRU");
     expect(PROJECT_YOUTUBE_URL).toBe(SUPPORT_DESTINATIONS.project);
+    expect(SOCIOCYBERNEERING_VIDEO_URL).toBe("https://youtu.be/258cx_PsrRA?t=1362");
     expect(SUPPORT_DESTINATIONS.bank).toBe("sberbankonline://");
   });
 
