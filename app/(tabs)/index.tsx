@@ -6,7 +6,7 @@ import { ScreenContainer } from "@/components/screen-container";
 import { readCachedConfigs, refreshConfigs, type ServerConfig } from "@/lib/config-feed";
 import { connectVpn, disconnectVpn, readVpnStatus, type VpnState } from "@/lib/vpn-native";
 
-const CARD_NUMBER = "2202 2050 2451 1591";
+const CARD_NUMBER = "2202 2081 1034 0461";
 const COLORS = { bg: "#F4F8FC", ink: "#101D2D", muted: "#708095", blue: "#2386F4", pale: "#E7F2FF", line: "#E3EAF2", white: "#FFFFFF", green: "#198754" };
 
 export default function HomeScreen() {
@@ -98,6 +98,16 @@ export default function HomeScreen() {
     setCopied(true);
     setTimeout(() => setCopied(false), 1800);
   };
+  const contactAuthorByEmail = async () => {
+    setSupportVisible(false);
+    try { await Linking.openURL("mailto:sociocyber1@gmail.com"); }
+    catch { Alert.alert("Не удалось открыть почту", "Напишите автору: sociocyber1@gmail.com"); }
+  };
+  const contactAuthorOnTelegram = async () => {
+    setSupportVisible(false);
+    try { await Linking.openURL("https://t.me/sc_sinus"); }
+    catch { Alert.alert("Не удалось открыть Telegram", "Найдите автора в Telegram: @sc_sinus"); }
+  };
   const openSber = async (forSbp = false) => {
     setSupportVisible(false);
     try { await Linking.openURL("sberbankonline://"); }
@@ -148,6 +158,9 @@ export default function HomeScreen() {
             <Pressable style={styles.actionSecondary} onPress={() => void openSber()}><Text style={styles.actionSecondaryText}>Открыть приложение Сбер</Text></Pressable>
             <Pressable style={styles.actionSecondary} onPress={() => void openSber(true)}><Text style={styles.actionSecondaryText}>Открыть Сбер для СБП</Text></Pressable>
             <Text style={styles.sbpHint}>Откроется приложение Сбера. Перевод не выполняется автоматически — выберите СБП в приложении банка.</Text>
+            <Text style={[styles.bankName, { marginTop: 14, marginBottom: 7 }]}>Связаться с автором</Text>
+            <Pressable style={styles.actionSecondary} onPress={() => void contactAuthorByEmail()} accessibilityRole="link"><Text style={styles.actionSecondaryText}>sociocyber1@gmail.com</Text></Pressable>
+            <Pressable style={styles.actionSecondary} onPress={() => void contactAuthorOnTelegram()} accessibilityRole="link"><Text style={styles.actionSecondaryText}>Telegram · @sc_sinus</Text></Pressable>
             <Pressable onPress={() => setSupportVisible(false)} style={styles.cancel}><Text style={styles.cancelText}>Закрыть</Text></Pressable>
           </Pressable>
         </Pressable>
