@@ -5,8 +5,8 @@ import * as Linking from "expo-linking";
 import { ScreenContainer } from "@/components/screen-container";
 import { readCachedConfigs, refreshConfigs, type ServerConfig } from "@/lib/config-feed";
 import { connectVpn, disconnectVpn, readVpnStatus, type VpnState } from "@/lib/vpn-native";
+import { BANK_CARD_NUMBER, ORGANIZATION_NAME, PROJECT_YOUTUBE_URL, copyBankCardNumber, openSupportDestination } from "@/lib/support-info";
 
-const CARD_NUMBER = "2202 2081 1034 0461";
 const COLORS = { bg: "#F4F8FC", ink: "#101D2D", muted: "#708095", blue: "#2386F4", pale: "#E7F2FF", line: "#E3EAF2", white: "#FFFFFF", green: "#198754" };
 
 export default function HomeScreen() {
@@ -16,6 +16,8 @@ export default function HomeScreen() {
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
   const [feedError, setFeedError] = useState(false);
   const [supportVisible, setSupportVisible] = useState(false);
+  const [supportNotice, setSupportNotice] = useState<string | null>(null);
+  const [projectNotice, setProjectNotice] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [vpnState, setVpnState] = useState<VpnState>("disconnected");
   const [vpnError, setVpnError] = useState<string | null>(null);
@@ -36,7 +38,10 @@ export default function HomeScreen() {
     } finally { setRefreshing(false); }
   }, []);
 
-  useEffect(() => { void updateFeed(); }, [updateFeed]);
+  useEffect(() => {
+    const timer = setTimeout(() => { void updateFeed(); }, 0);
+    return () => clearTimeout(timer);
+  }, [updateFeed]);
   useEffect(() => {
     if (Platform.OS !== "android") return;
     let active = true;
@@ -94,24 +99,29 @@ export default function HomeScreen() {
   const statusColor = vpnState === "connected" ? COLORS.green : vpnState === "error" ? "#D9485F" : active ? COLORS.blue : COLORS.muted;
 
   const copyCard = async () => {
-    await Clipboard.setStringAsync(CARD_NUMBER);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1800);
+    try {
+      await copyBankCardNumber((text) => Clipboard.setStringAsync(text));
+      setCopied(true);
+      setSupportNotice(null);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      setCopied(false);
+      setSupportNotice(`Не удалось скопировать. Номер карты: ${BANK_CARD_NUMBER}`);
+    }
   };
-  const contactAuthorByEmail = async () => {
+  const openSupportLink = async (destination: "email" | "telegram" | "bank", failure: string) => {
     setSupportVisible(false);
-    try { await Linking.openURL("mailto:sociocyber1@gmail.com"); }
-    catch { Alert.alert("Не удалось открыть почту", "Напишите автору: sociocyber1@gmail.com"); }
+    setSupportNotice(null);
+    try { await openSupportDestination(destination, (url) => Linking.openURL(url)); }
+    catch {
+      setSupportNotice(failure);
+      setSupportVisible(true);
+    }
   };
-  const contactAuthorOnTelegram = async () => {
-    setSupportVisible(false);
-    try { await Linking.openURL("https://t.me/sc_sinus"); }
-    catch { Alert.alert("Не удалось открыть Telegram", "Найдите автора в Telegram: @sc_sinus"); }
-  };
-  const openSber = async (forSbp = false) => {
-    setSupportVisible(false);
-    try { await Linking.openURL("sberbankonline://"); }
-    catch { Alert.alert("Сбер не найден", forSbp ? "Скопируйте номер карты и откройте СБП в приложении банка." : "Установите приложение Сбер или скопируйте номер карты."); }
+  const openProject = async () => {
+    setProjectNotice(null);
+    try { await openSupportDestination("project", (url) => Linking.openURL(url)); }
+    catch { setProjectNotice(`Не удалось открыть ссылку. Откройте вручную: ${PROJECT_YOUTUBE_URL}`); }
   };
   return (
     <ScreenContainer containerClassName="bg-[#F4F8FC]">
@@ -142,9 +152,17 @@ export default function HomeScreen() {
         </Pressable>
         <Text style={styles.feedNote}>{feedError ? "Не удалось проверить README. Показан сохранённый список, если он есть." : updatedAt ? `Список проверен ${updatedAt.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}` : "Источник: sociocyber1/txt · README.md"}</Text>
 
-        <Pressable onPress={() => setSupportVisible(true)} style={styles.supportCard} accessibilityRole="button">
+        <Pressable onPress={() => { setSupportNotice(null); setSupportVisible(true); }} style={styles.supportCard} accessibilityRole="button">
           <View style={styles.supportIntro}><Text style={styles.heart}>♡</Text><View style={{ flex: 1 }}><Text style={styles.supportTitle}>Поддержать автора</Text><Text style={styles.supportSub}>Показать реквизиты</Text></View><Text style={styles.chevron}>›</Text></View>
         </Pressable>
+        <View style={[styles.supportCard, { marginTop: 12 }]}>
+          <Text style={styles.sectionTitle}>О проекте</Text>
+          <Text style={[styles.supportTitle, { marginTop: 8 }]}>{ORGANIZATION_NAME}</Text>
+          <Pressable onPress={() => void openProject()} style={[styles.actionSecondary, { marginTop: 12, marginBottom: 0 }]} accessibilityRole="link">
+            <Text style={styles.actionSecondaryText}>Материалы о проекте на YouTube</Text>
+          </Pressable>
+          {projectNotice ? <Text style={[styles.footnote, { color: "#D9485F" }]}>{projectNotice}</Text> : null}
+        </View>
         <Text style={styles.footnote}>Конфигурации обновляются из открытого репозитория. Для создания VPN Android запросит системное разрешение.</Text>
       </ScrollView>
 
@@ -153,14 +171,14 @@ export default function HomeScreen() {
           <Pressable style={styles.sheet} onPress={(event) => event.stopPropagation()}>
             <View style={styles.handle} /><Text style={styles.sheetTitle}>Поддержать автора</Text>
             <Text style={styles.supportCopy}>Если вы считаете эту работу полезной — можно помочь деньгами. Коротко, без драматургии: автор делает всё сам, из своего кармана и бесплатно, а подписки, инструменты, сервера и время на них расходуются вполне материально.</Text>
-            <Text style={[styles.bankName, { marginTop: 14 }]}>Сбер</Text><Text style={styles.sheetCard}>{CARD_NUMBER}</Text>
+            <Text style={[styles.bankName, { marginTop: 14 }]}>Сбер</Text><Text style={styles.sheetCard}>{BANK_CARD_NUMBER}</Text>
             <Pressable style={styles.actionPrimary} onPress={() => void copyCard()}><Text style={styles.actionPrimaryText}>{copied ? "Номер скопирован" : "Скопировать номер карты"}</Text></Pressable>
-            <Pressable style={styles.actionSecondary} onPress={() => void openSber()}><Text style={styles.actionSecondaryText}>Открыть приложение Сбер</Text></Pressable>
-            <Pressable style={styles.actionSecondary} onPress={() => void openSber(true)}><Text style={styles.actionSecondaryText}>Открыть Сбер для СБП</Text></Pressable>
-            <Text style={styles.sbpHint}>Откроется приложение Сбера. Перевод не выполняется автоматически — выберите СБП в приложении банка.</Text>
+            {supportNotice ? <Text style={[styles.footnote, { color: "#D9485F", marginBottom: 8 }]}>{supportNotice}</Text> : null}
+            <Pressable style={styles.actionSecondary} onPress={() => void openSupportLink("bank", "Не удалось открыть Сбер. Скопируйте номер карты и откройте приложение банка вручную.")}><Text style={styles.actionSecondaryText}>Открыть приложение Сбер</Text></Pressable>
+            <Text style={styles.sbpHint}>Ссылка открывает Сбербанк Онлайн, но не конкретный экран СБП. Для перевода выберите СБП вручную; автоматический перевод не выполняется.</Text>
             <Text style={[styles.bankName, { marginTop: 14, marginBottom: 7 }]}>Связаться с автором</Text>
-            <Pressable style={styles.actionSecondary} onPress={() => void contactAuthorByEmail()} accessibilityRole="link"><Text style={styles.actionSecondaryText}>sociocyber1@gmail.com</Text></Pressable>
-            <Pressable style={styles.actionSecondary} onPress={() => void contactAuthorOnTelegram()} accessibilityRole="link"><Text style={styles.actionSecondaryText}>Telegram · @sc_sinus</Text></Pressable>
+            <Pressable style={styles.actionSecondary} onPress={() => void openSupportLink("email", "Не удалось открыть почту. Напишите автору: sociocyber1@gmail.com")} accessibilityRole="link"><Text style={styles.actionSecondaryText}>sociocyber1@gmail.com</Text></Pressable>
+            <Pressable style={styles.actionSecondary} onPress={() => void openSupportLink("telegram", "Не удалось открыть Telegram. Найдите автора: @sc_sinus (https://t.me/sc_sinus)")} accessibilityRole="link"><Text style={styles.actionSecondaryText}>Telegram · @sc_sinus</Text></Pressable>
             <Pressable onPress={() => setSupportVisible(false)} style={styles.cancel}><Text style={styles.cancelText}>Закрыть</Text></Pressable>
           </Pressable>
         </Pressable>
