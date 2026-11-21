@@ -2,7 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 
 const README_URL = "https://raw.githubusercontent.com/sociocyber1/txt/main/README.md";
 const CACHE_KEY = "cybervpn.configs.v1";
-const REQUEST_TIMEOUT_MS = 12_000;
+const REQUEST_TIMEOUT_MS = 20_000;
 
 export type ServerConfig = { id: string; name: string; uri: string };
 
@@ -68,11 +68,10 @@ export async function refreshConfigs(): Promise<ServerConfig[]> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    const response = await fetch(README_URL, {
-      headers: { Accept: "text/plain", "Cache-Control": "no-cache" },
-      cache: "no-store",
-      signal: controller.signal,
-    });
+    // A Cache-Control request header makes browser fetch issue an OPTIONS preflight.
+    // raw.githubusercontent.com rejects that preflight, so keep this a simple GET.
+    // The unique query prevents a stale README from an intermediary cache.
+    const response = await fetch(`${README_URL}?_=${Date.now()}`, { signal: controller.signal });
     if (!response.ok) throw new Error(`Не удалось загрузить README: HTTP ${response.status}`);
     const configs = parseConfigs(await response.text());
     if (!configs.length) throw new Error("В README не найдены допустимые ссылки hy2://");
