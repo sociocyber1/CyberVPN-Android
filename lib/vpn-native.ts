@@ -8,6 +8,7 @@ export type FirewallSettings = {
   enabled: boolean;
   blockAll: boolean;
   blockedPackages: string[];
+  excludedPackages: string[];
   lockdownEnabled: boolean;
   alwaysOn: boolean;
   hasSavedConfig: boolean;
@@ -31,6 +32,7 @@ type NativeVpnModule = {
   getInstalledApps(): Promise<InstalledVpnApp[]>;
   getFirewallSettings(): Promise<FirewallSettings>;
   setFirewallSettings(enabled: boolean, blockAll: boolean, blockedPackages: string[]): Promise<FirewallSettings>;
+  setExcludedApplications(packages: string[]): Promise<FirewallSettings>;
   openVpnSettings(): Promise<void>;
   getLiveConnections(): Promise<LiveVpnFlow[]>;
 };
@@ -77,6 +79,11 @@ export async function readFirewallSettings(): Promise<FirewallSettings> {
 export async function saveFirewallSettings(settings: Pick<FirewallSettings, "enabled" | "blockAll" | "blockedPackages">): Promise<FirewallSettings> {
   const module = await getNativeModule();
   return module.setFirewallSettings(settings.enabled, settings.blockAll, settings.blockedPackages);
+}
+
+export async function saveExcludedApplications(packages: string[]): Promise<FirewallSettings> {
+  const module = await getNativeModule();
+  return module.setExcludedApplications(packages);
 }
 
 export async function openAndroidVpnSettings(): Promise<void> {

@@ -46,6 +46,7 @@ class CyberVpnService : VpnService() {
   @Volatile private var currentFirewallEnabled = false
   @Volatile private var currentBlockAll = false
   @Volatile private var currentBlockedPackages: Set<String> = emptySet()
+  @Volatile private var currentExcludedPackages: Set<String> = emptySet()
   private val liveFlows = ConcurrentHashMap<String, Map<String, Any>>()
 
   override fun onCreate() {
@@ -182,6 +183,9 @@ class CyberVpnService : VpnService() {
   }
 
   internal suspend fun applyFirewallSettings(enabled: Boolean, blockAll: Boolean, blockedPackages: List<String>) {
+    check(!enabled || currentExcludedPackages.isEmpty()) {
+      "Firewall нельзя включить вместе с исключениями приложений из VPN"
+    }
     refreshLockdownState()
     check(!enabled || (refreshAlwaysOnState() && isLockdownEnabled)) {
       "Firewall требует Always-on VPN и Block connections without VPN в настройках Android"
@@ -265,9 +269,21 @@ class CyberVpnService : VpnService() {
       it != packageName && runCatching { packageManager.getApplicationInfo(it, 0) }.isSuccess
     }
     currentBlockedPackages = savedPackages.toSet()
+    val storedExcluded = readStringList(preferences.getString(KEY_EXCLUDED_PACKAGES, "[]"))
+    val savedExcluded = storedExcluded.filter {
+      it != packageName && runCatching { packageManager.getApplicationInfo(it, 0) }.isSuccess
+    }
+    currentExcludedPackages = savedExcluded.toSet()
     if (savedPackages != storedPackages) {
       preferences.edit().putString(KEY_BLOCKED_PACKAGES, JSONArray(savedPackages).toString()).apply()
     }
+    if (savedExcluded != storedExcluded) {
+      preferences.edit().putString(KEY_EXCLUDED_PACKAGES, JSONArray(savedExcluded).toString()).apply()
+    }
+  }
+
+  internal fun setExcludedApplications(packages: List<String>) {
+    currentExcludedPackages = packages.toSet()
   }
 
   fun refreshLockdownState(): Boolean {
@@ -383,6 +399,14 @@ class CyberVpnService : VpnService() {
   )
 
   private fun establishTunnel(config: TunConfig): ParcelFileDescriptor {
+    check(!currentFirewallEnabled || currentExcludedPackages.isEmpty()) {
+      "Firewall нельзя использовать одновременно с исключениями приложений из VPN"
+    }
+    if (currentExcludedPackages.isNotEmpty()) {
+      check(!(refreshAlwaysOnState() && refreshLockdownState())) {
+        "Отключите Android Lockdown: он блокирует трафик исключённых из VPN приложений"
+      }
+    }
     if (currentFirewallEnabled) {
       check(refreshAlwaysOnState() && refreshLockdownState()) {
         "Firewall требует Always-on VPN и Block connections without VPN в настройках Android"
@@ -413,6 +437,13 @@ class CyberVpnService : VpnService() {
             runCatching { builder.addDisallowedApplication(blockedPackage) }
               .onFailure { Log.w(TAG, "Skipping unavailable blocked package: $blockedPackage", it) }
           }
+        }
+      }
+    } else {
+      currentExcludedPackages.forEach { excludedPackage ->
+        if (runCatching { packageManager.getApplicationInfo(excludedPackage, 0) }.isSuccess) {
+          runCatching { builder.addDisallowedApplication(excludedPackage) }
+            .onFailure { Log.w(TAG, "Skipping unavailable VPN-excluded package: $excludedPackage", it) }
         }
       }
     }
@@ -539,6 +570,7 @@ class CyberVpnService : VpnService() {
     const val KEY_FIREWALL_ENABLED = "firewall_enabled"
     const val KEY_BLOCK_ALL = "block_all_apps"
     const val KEY_BLOCKED_PACKAGES = "blocked_packages"
+    const val KEY_EXCLUDED_PACKAGES = "excluded_packages"
     const val KEY_LOCKDOWN_ENABLED = "lockdown_enabled"
     const val KEY_ALWAYS_ON = "always_on"
     const val STATE_DISCONNECTED = "disconnected"

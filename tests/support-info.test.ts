@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AUTHOR_EMAIL,
   BANK_CARD_NUMBER,
+  CYBERCORD_REPOSITORY_URL,
   ORGANIZATION_NAME,
   PROJECT_YOUTUBE_URL,
   SOCIOCYBERNEERING_VIDEO_URL,
@@ -23,6 +24,8 @@ describe("CyberVPN support and project details", () => {
     expect(SUPPORT_DESTINATIONS.email).toBe("mailto:sociocyber1@gmail.com");
     expect(SUPPORT_DESTINATIONS.telegram).toBe("https://t.me/sc_sinus");
     expect(SUPPORT_DESTINATIONS.project).toBe("https://www.youtube.com/@JacqueFrescoRU");
+    expect(SUPPORT_DESTINATIONS.cybercord).toBe("https://github.com/sociocyber1/CyberCord");
+    expect(CYBERCORD_REPOSITORY_URL).toBe(SUPPORT_DESTINATIONS.cybercord);
     expect(PROJECT_YOUTUBE_URL).toBe(SUPPORT_DESTINATIONS.project);
     expect(SOCIOCYBERNEERING_VIDEO_URL).toBe("https://youtu.be/258cx_PsrRA?t=1362");
     expect(SUPPORT_DESTINATIONS.bank).toBe("sberbankonline://");

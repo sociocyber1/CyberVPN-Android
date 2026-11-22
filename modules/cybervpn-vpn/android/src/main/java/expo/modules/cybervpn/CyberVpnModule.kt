@@ -125,6 +125,10 @@ class CyberVpnModule : Module() {
       }.take(500)
       val service = CyberVpnService.runningInstance
       val preferences = context.getSharedPreferences(CyberVpnService.PREFERENCES, Context.MODE_PRIVATE)
+      val excluded = readPackageList(preferences.getString(CyberVpnService.KEY_EXCLUDED_PACKAGES, "[]"))
+      if (enabled && excluded.isNotEmpty()) {
+        throw IllegalStateException("Firewall нельзя включить вместе с исключениями из VPN. Сначала удалите исключения приложений.")
+      }
       val state = preferences.getString(CyberVpnService.KEY_STATE, CyberVpnService.STATE_DISCONNECTED)
       if (enabled && (state != CyberVpnService.STATE_CONNECTED || service == null)) {
         throw IllegalStateException("Сначала подключите CyberVPN: правила Firewall можно активировать только при установленном туннеле")
@@ -141,6 +145,29 @@ class CyberVpnModule : Module() {
         .putBoolean(CyberVpnService.KEY_BLOCK_ALL, blockAll)
         .putString(CyberVpnService.KEY_BLOCKED_PACKAGES, JSONArray(policy).toString())
         .apply()
+      readFirewallSettings(context)
+    }
+
+    AsyncFunction("setExcludedApplications") Coroutine { excludedPackages: List<String> ->
+      val context = requireNotNull(appContext.reactContext) { "Приложение уже закрыто" }
+      val packages = excludedPackages.distinct().filter { packageName ->
+        packageName.isNotBlank() && packageName != context.packageName &&
+          runCatching { context.packageManager.getApplicationInfo(packageName, 0) }.isSuccess
+      }.take(500)
+      val preferences = context.getSharedPreferences(CyberVpnService.PREFERENCES, Context.MODE_PRIVATE)
+      val state = preferences.getString(CyberVpnService.KEY_STATE, CyberVpnService.STATE_DISCONNECTED)
+      if (state != CyberVpnService.STATE_DISCONNECTED) {
+        throw IllegalStateException("Для изменения исключений полностью отключите VPN. Правила применятся при следующем подключении.")
+      }
+      if (preferences.getBoolean(CyberVpnService.KEY_FIREWALL_ENABLED, false)) {
+        throw IllegalStateException("Сначала отключите правила Firewall: блокировка и обход VPN несовместимы.")
+      }
+      val service = CyberVpnService.runningInstance
+      if (service?.refreshLockdownState() == true) {
+        throw IllegalStateException("Отключите Android Lockdown (Block connections without VPN), чтобы исключённые приложения могли выйти напрямую.")
+      }
+      preferences.edit().putString(CyberVpnService.KEY_EXCLUDED_PACKAGES, JSONArray(packages).toString()).apply()
+      service?.setExcludedApplications(packages)
       readFirewallSettings(context)
     }
 
@@ -187,16 +214,29 @@ class CyberVpnModule : Module() {
     val packages = storedPackages.filter { packageName ->
       packageName != context.packageName && runCatching { context.packageManager.getApplicationInfo(packageName, 0) }.isSuccess
     }
+    val storedExcluded = readPackageList(preferences.getString(CyberVpnService.KEY_EXCLUDED_PACKAGES, "[]"))
+    val excluded = storedExcluded.filter { packageName ->
+      packageName != context.packageName && runCatching { context.packageManager.getApplicationInfo(packageName, 0) }.isSuccess
+    }
     if (packages != storedPackages) preferences.edit()
       .putString(CyberVpnService.KEY_BLOCKED_PACKAGES, JSONArray(packages).toString())
+      .apply()
+    if (excluded != storedExcluded) preferences.edit()
+      .putString(CyberVpnService.KEY_EXCLUDED_PACKAGES, JSONArray(excluded).toString())
       .apply()
     return mapOf(
       "enabled" to preferences.getBoolean(CyberVpnService.KEY_FIREWALL_ENABLED, false),
       "blockAll" to preferences.getBoolean(CyberVpnService.KEY_BLOCK_ALL, false),
       "blockedPackages" to packages,
+      "excludedPackages" to excluded,
       "lockdownEnabled" to lockdown,
       "alwaysOn" to alwaysOn,
       "hasSavedConfig" to !preferences.getString(CyberVpnService.KEY_CONFIG_URI, null).isNullOrBlank(),
     )
   }
+
+  private fun readPackageList(raw: String?): List<String> = try {
+    val json = JSONArray(raw ?: "[]")
+    (0 until json.length()).mapNotNull { index -> json.optString(index).takeIf(String::isNotBlank) }
+  } catch (_: Throwable) { emptyList() }
 }

@@ -10,7 +10,7 @@ import { DEFAULT_NO_TO_VPN_SETTINGS, MAX_NO_TO_VPN_RULES, loadNoToVpnSettings, p
 import { DEFAULT_VPN_DNS_SETTINGS, loadVpnDnsSettings, parseVpnDnsServers, saveVpnDnsSettings, type VpnDnsTransport } from "@/lib/dns-settings";
 import { PUBLIC_DNS_PRESETS } from "@/lib/dns-presets";
 import { noToVpnStyles } from "@/lib/no-to-vpn-styles";
-import { BANK_CARD_NUMBER, ORGANIZATION_NAME, PROJECT_YOUTUBE_URL, SOCIOCYBERNEERING_VIDEO_URL, copyBankCardNumber, openSupportDestination } from "@/lib/support-info";
+import { BANK_CARD_NUMBER, CYBERCORD_REPOSITORY_URL, ORGANIZATION_NAME, PROJECT_YOUTUBE_URL, SOCIOCYBERNEERING_VIDEO_URL, copyBankCardNumber, openSupportDestination } from "@/lib/support-info";
 
 const COLORS = { bg: "#F4F8FC", ink: "#101D2D", muted: "#708095", blue: "#2386F4", pale: "#E7F2FF", line: "#E3EAF2", white: "#FFFFFF", green: "#198754" };
 
@@ -252,7 +252,7 @@ export default function HomeScreen() {
       setSupportNotice(`Не удалось скопировать. Номер карты: ${BANK_CARD_NUMBER}`);
     }
   };
-  const openSupportLink = async (destination: "email" | "telegram" | "bank", failure: string) => {
+  const openSupportLink = async (destination: "email" | "telegram" | "bank" | "cybercord", failure: string) => {
     setSupportVisible(false);
     setSupportNotice(null);
     try { await openSupportDestination(destination, (url) => Linking.openURL(url)); }
@@ -451,6 +451,8 @@ export default function HomeScreen() {
             {supportNotice ? <Text style={[styles.footnote, { color: "#D9485F", marginBottom: 8 }]}>{supportNotice}</Text> : null}
             <Pressable style={styles.actionSecondary} onPress={() => void openSupportLink("bank", "Не удалось открыть Сбер. Скопируйте номер карты и откройте приложение банка вручную.")}><Text style={styles.actionSecondaryText}>Открыть приложение Сбер</Text></Pressable>
             <Text style={styles.sbpHint}>Ссылка открывает Сбербанк Онлайн, но не конкретный экран СБП. Для перевода выберите СБП вручную; автоматический перевод не выполняется.</Text>
+            <Text style={[styles.bankName, { marginTop: 14, marginBottom: 7 }]}>Другие проекты</Text>
+            <Pressable style={styles.actionSecondary} onPress={() => void openSupportLink("cybercord", `Не удалось открыть ссылку. Откройте вручную: ${CYBERCORD_REPOSITORY_URL}`)} accessibilityRole="link"><Text style={styles.actionSecondaryText}>CyberCord · GitHub</Text></Pressable>
             <Text style={[styles.bankName, { marginTop: 14, marginBottom: 7 }]}>Связаться с автором</Text>
             <Pressable style={styles.actionSecondary} onPress={() => void openSupportLink("email", "Не удалось открыть почту. Напишите автору: sociocyber1@gmail.com")} accessibilityRole="link"><Text style={styles.actionSecondaryText}>sociocyber1@gmail.com</Text></Pressable>
             <Pressable style={styles.actionSecondary} onPress={() => void openSupportLink("telegram", "Не удалось открыть Telegram. Найдите автора: @sc_sinus (https://t.me/sc_sinus)")} accessibilityRole="link"><Text style={styles.actionSecondaryText}>Telegram · @sc_sinus</Text></Pressable>

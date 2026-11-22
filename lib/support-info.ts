@@ -3,6 +3,7 @@ export const BANK_CARD_NUMBER = "2202 2081 1034 0461";
 export const AUTHOR_EMAIL = "sociocyber1@gmail.com";
 export const TELEGRAM_HANDLE = "@sc_sinus";
 export const PROJECT_YOUTUBE_URL = "https://www.youtube.com/@JacqueFrescoRU";
+export const CYBERCORD_REPOSITORY_URL = "https://github.com/sociocyber1/CyberCord";
 export const SOCIOCYBERNEERING_VIDEO_URL = "https://youtu.be/258cx_PsrRA?t=1362";
 
 export const SUPPORT_DESTINATIONS = {
@@ -10,6 +11,7 @@ export const SUPPORT_DESTINATIONS = {
   telegram: "https://t.me/sc_sinus",
   bank: "sberbankonline://",
   project: PROJECT_YOUTUBE_URL,
+  cybercord: CYBERCORD_REPOSITORY_URL,
 } as const;
 
 export type SupportDestination = keyof typeof SUPPORT_DESTINATIONS;
