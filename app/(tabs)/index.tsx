@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Alert, Animated, Easing, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
+import { useFonts } from "expo-font";
+import Svg, { Path } from "react-native-svg";
 import * as Clipboard from "expo-clipboard";
 import * as Linking from "expo-linking";
 import { ScreenContainer } from "@/components/screen-container";
@@ -15,7 +17,9 @@ import { BANK_CARD_NUMBER, CYBERCORD_REPOSITORY_URL, ORGANIZATION_NAME, PROJECT_
 const COLORS = { bg: "#F4F8FC", ink: "#101D2D", muted: "#708095", blue: "#2386F4", pale: "#E7F2FF", line: "#E3EAF2", white: "#FFFFFF", green: "#198754" };
 
 export default function HomeScreen() {
+  const [brandFontLoaded] = useFonts({ LatinModernSans: require("../../assets/fonts/lmsans10-regular.otf") });
   const pulse = useMemo(() => new Animated.Value(0), []);
+  const refreshRotation = useMemo(() => new Animated.Value(0), []);
   const [servers, setServers] = useState<ServerConfig[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(true);
@@ -59,6 +63,16 @@ export default function HomeScreen() {
     } finally { setRefreshing(false); }
   }, []);
 
+  useEffect(() => {
+    if (!refreshing) {
+      refreshRotation.stopAnimation();
+      refreshRotation.setValue(0);
+      return;
+    }
+    const spin = Animated.loop(Animated.timing(refreshRotation, { toValue: 1, duration: 850, easing: Easing.linear, useNativeDriver: true }));
+    spin.start();
+    return () => spin.stop();
+  }, [refreshing, refreshRotation]);
   useEffect(() => {
     const timer = setTimeout(() => { void updateFeed(); }, 0);
     return () => clearTimeout(timer);
@@ -276,8 +290,16 @@ export default function HomeScreen() {
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         <View style={styles.topRow}>
           <View style={styles.brandMark}><Text style={styles.brandMarkText}>C</Text></View>
-          <View style={{ flex: 1 }}><Text style={styles.brand}>CyberVPN</Text><Text style={styles.caption}>ПРОСТО. БЫСТРО. БЕЗ ЛИШНЕГО.</Text></View>
-          <Pressable onPress={() => void updateFeed()} style={styles.refreshButton} accessibilityLabel="Обновить серверы"><MaterialCommunityIcons name={refreshing ? "loading" : "refresh"} size={23} color={COLORS.blue} /></Pressable>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={styles.brand}>CyberVPN</Text>
+            <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.78} style={{ color: "#34445A", fontFamily: brandFontLoaded ? "LatinModernSans" : undefined, fontSize: 9, letterSpacing: 1.5, lineHeight: 13, marginTop: 1 }}>SocioCyberneering Inc.</Text>
+            <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72} style={styles.caption}>ПРОСТО. БЫСТРО. БЕЗ ЛИШНЕГО.</Text>
+          </View>
+          <Pressable onPress={() => void updateFeed()} style={styles.refreshButton} accessibilityRole="button" accessibilityLabel={refreshing ? "Обновление серверов" : "Обновить серверы"} accessibilityState={{ busy: refreshing }}>
+            <Animated.View style={{ transform: [{ rotate: refreshRotation.interpolate({ inputRange: [0, 1], outputRange: ["0deg", "360deg"] }) }] }}>
+              <Svg width={23} height={23} viewBox="0 0 24 24"><Path d="M17.65 6.35A7.95 7.95 0 0 0 12 4a8 8 0 1 0 7.93 9h-2.02A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35Z" fill={COLORS.blue} /></Svg>
+            </Animated.View>
+          </Pressable>
         </View>
 
         <View style={styles.hero}>
