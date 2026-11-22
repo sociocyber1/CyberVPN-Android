@@ -338,7 +338,7 @@ export default function HomeScreen() {
           <View style={noToVpnStyles.header}>
             <View style={{ flex: 1 }}>
               <Text style={styles.sectionTitle}>NoToVPN</Text>
-              <Text style={noToVpnStyles.description}>Только выбранные домены идут напрямую; остальные соединения остаются в VPN.</Text>
+              <Text style={noToVpnStyles.description}>Напрямую идут IP из DNS-ответов выбранных доменов; общий CDN-IP может временно затронуть другие домены.</Text>
             </View>
             <Switch
               value={noToVpnSettings.enabled}
