@@ -9,6 +9,7 @@ import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.Process
 import android.util.Log
 import org.json.JSONArray
 import kotlinx.coroutines.CancellationException
@@ -31,6 +32,8 @@ import ru.shapovalov.hysteria.api.Ipv6Mode
 import ru.shapovalov.hysteria.api.TunConfig
 import ru.shapovalov.hysteria.parseHysteriaUri
 import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.util.concurrent.ConcurrentHashMap
 
 class CyberVpnService : VpnService() {
   private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -40,12 +43,18 @@ class CyberVpnService : VpnService() {
   private var directDnsBase = cloudflareDnsFallback()
   private var currentBypassDomains: List<String> = emptyList()
   private var currentDns = DnsUpstream.Default
+  @Volatile private var currentFirewallEnabled = false
+  @Volatile private var currentBlockAll = false
+  @Volatile private var currentBlockedPackages: Set<String> = emptySet()
+  private val liveFlows = ConcurrentHashMap<String, Map<String, Any>>()
 
   override fun onCreate() {
     super.onCreate()
     isRunning = true
     runningInstance = this
     createNotificationChannel()
+    refreshLockdownState()
+    refreshAlwaysOnState()
     stateJob = serviceScope.launch {
       hysteriaClient.state.collect { state ->
         when (state) {
@@ -64,6 +73,11 @@ class CyberVpnService : VpnService() {
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     when (intent?.action) {
       ACTION_DISCONNECT -> {
+        if (refreshAlwaysOnState() && refreshLockdownState()) {
+          fail("Отключите Block connections without VPN в настройках Android перед остановкой CyberVPN")
+          return START_STICKY
+        }
+        getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit().remove(KEY_CONFIG_URI).apply()
         stopTunnel()
         return START_NOT_STICKY
       }
@@ -92,13 +106,11 @@ class CyberVpnService : VpnService() {
           return START_NOT_STICKY
         }
         startForeground(NOTIFICATION_ID, notification("Подключаемся к серверу…"))
+        getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit().putString(KEY_CONFIG_URI, uri).apply()
         if (connectionJob?.isActive != true) startTunnel(uri, domains, DnsUpstream(DnsTransport.values().first { it.wire == dns.first }, dns.second))
-        return START_NOT_STICKY
+        return START_STICKY
       }
-      else -> {
-        stopSelf(startId)
-        return START_NOT_STICKY
-      }
+      else -> return restoreSavedConfiguration(startId)
     }
   }
 
@@ -108,8 +120,13 @@ class CyberVpnService : VpnService() {
       try {
         currentBypassDomains = bypassDomains
         currentDns = dns
+        loadFirewallPolicy()
+        check(!currentFirewallEnabled || (refreshAlwaysOnState() && refreshLockdownState())) {
+          "Firewall требует Always-on VPN и Block connections without VPN в настройках Android"
+        }
         directDnsBase = discoverDirectDnsBase()
         getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit()
+          .putString(KEY_CONFIG_URI, uri)
           .putString(KEY_BYPASS_DOMAINS, JSONArray(bypassDomains).toString())
           .apply()
         val parsed = parseHysteriaUri(uri)
@@ -122,6 +139,9 @@ class CyberVpnService : VpnService() {
             override fun bindAndProtect(fd: Int): Boolean = this@CyberVpnService.protect(fd)
           },
           tun = HysteriaClient.TunFactory(::establishTunnel),
+          flowFilter = HysteriaClient.FlowFilter { protocol, source, sourcePort, destination, destinationPort ->
+            observeFlow(protocol, source, sourcePort, destination, destinationPort)
+          },
         )
         if (hysteriaClient.state.value is ConnectionState.Connected) {
           setState(STATE_CONNECTED)
@@ -159,6 +179,143 @@ class CyberVpnService : VpnService() {
       stopSelf()
       throw IllegalStateException("Не удалось применить правила NoToVPN; VPN остановлен", error)
     }
+  }
+
+  internal suspend fun applyFirewallSettings(enabled: Boolean, blockAll: Boolean, blockedPackages: List<String>) {
+    refreshLockdownState()
+    check(!enabled || (refreshAlwaysOnState() && isLockdownEnabled)) {
+      "Firewall требует Always-on VPN и Block connections without VPN в настройках Android"
+    }
+    val state = hysteriaClient.state.value
+    check(!enabled || state is ConnectionState.Connected) {
+      "Сначала подключите CyberVPN: Firewall можно включить только при активном туннеле"
+    }
+    check(state !is ConnectionState.Connecting && state !is ConnectionState.Reconnecting) {
+      "Дождитесь завершения подключения перед изменением Firewall"
+    }
+    val oldEnabled = currentFirewallEnabled
+    val oldBlockAll = currentBlockAll
+    val oldBlocked = currentBlockedPackages
+    currentFirewallEnabled = enabled
+    currentBlockAll = blockAll
+    currentBlockedPackages = blockedPackages.toSet()
+    if (state is ConnectionState.Connected) {
+      try {
+        hysteriaClient.updateTun(tunConfig = tunConfigFor(currentBypassDomains), tun = HysteriaClient.TunFactory(::establishTunnel))
+      } catch (error: Throwable) {
+        currentFirewallEnabled = oldEnabled
+        currentBlockAll = oldBlockAll
+        currentBlockedPackages = oldBlocked
+        Log.e(TAG, "Firewall update failed; stopping VPN to avoid applying an uncertain policy", error)
+        hysteriaClient.shutdown(DisconnectReason.USER)
+        connectionJob?.cancel()
+        connectionJob = null
+        fail("Не удалось безопасно применить Firewall. VPN остановлен; подключитесь снова.")
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+        throw IllegalStateException("Не удалось применить правила Firewall; VPN остановлен", error)
+      }
+    }
+  }
+
+  private fun restoreSavedConfiguration(startId: Int): Int {
+    val preferences = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+    val uri = preferences.getString(KEY_CONFIG_URI, null)
+    if (uri.isNullOrBlank()) {
+      fail("Для Always-on VPN нет сохранённой конфигурации. Откройте CyberVPN и подключитесь вручную.")
+      stopSelf(startId)
+      return START_NOT_STICKY
+    }
+    try {
+      val savedDomains = NoToVpnDomains.normalize(readStringList(preferences.getString(KEY_BYPASS_DOMAINS, "[]")))
+      val previousBuiltInDefaults = setOf(
+        ".ru", ".kz", ".eu", "gosuslugi.ru", "government.ru", "nalog.gov.ru", "kremlin.ru",
+      )
+      val domains = if (savedDomains.size == previousBuiltInDefaults.size && savedDomains.toSet() == previousBuiltInDefaults) {
+        preferences.edit().putString(KEY_BYPASS_DOMAINS, "[]").apply()
+        emptyList()
+      } else savedDomains
+      val dns = VpnDnsSettings.normalize(
+        preferences.getString(KEY_DNS_TRANSPORT, "udp") ?: "udp",
+        readStringList(preferences.getString(KEY_DNS_SERVERS, "[]")),
+      )
+      startForeground(NOTIFICATION_ID, notification("Восстанавливаем Always-on VPN…"))
+      if (connectionJob?.isActive != true) {
+        startTunnel(uri, domains, DnsUpstream(DnsTransport.values().first { it.wire == dns.first }, dns.second))
+      }
+      return START_STICKY
+    } catch (error: Throwable) {
+      fail(error.message ?: "Не удалось восстановить сохранённую конфигурацию")
+      stopSelf(startId)
+      return START_NOT_STICKY
+    }
+  }
+
+  private fun readStringList(raw: String?): List<String> = try {
+    val json = JSONArray(raw ?: "[]")
+    (0 until json.length()).mapNotNull { json.optString(it).takeIf(String::isNotBlank) }
+  } catch (_: Throwable) { emptyList() }
+
+  private fun loadFirewallPolicy() {
+    val preferences = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+    currentFirewallEnabled = preferences.getBoolean(KEY_FIREWALL_ENABLED, false)
+    currentBlockAll = preferences.getBoolean(KEY_BLOCK_ALL, false)
+    val storedPackages = readStringList(preferences.getString(KEY_BLOCKED_PACKAGES, "[]"))
+    val savedPackages = storedPackages.filter {
+      it != packageName && runCatching { packageManager.getApplicationInfo(it, 0) }.isSuccess
+    }
+    currentBlockedPackages = savedPackages.toSet()
+    if (savedPackages != storedPackages) {
+      preferences.edit().putString(KEY_BLOCKED_PACKAGES, JSONArray(savedPackages).toString()).apply()
+    }
+  }
+
+  fun refreshLockdownState(): Boolean {
+    val enabled = runCatching { isLockdownEnabled }.getOrDefault(false)
+    getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit().putBoolean(KEY_LOCKDOWN_ENABLED, enabled).apply()
+    return enabled
+  }
+
+  fun refreshAlwaysOnState(): Boolean {
+    val enabled = Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && runCatching { isAlwaysOn }.getOrDefault(false)
+    getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit().putBoolean(KEY_ALWAYS_ON, enabled).apply()
+    return enabled
+  }
+
+  private fun observeFlow(protocol: Int, source: String, sourcePort: Int, destination: String, destinationPort: Int): Boolean {
+    val uid = if (protocol == 6 || protocol == 17) runCatching {
+      getSystemService(ConnectivityManager::class.java)?.getConnectionOwnerUid(
+        protocol,
+        InetSocketAddress(InetAddress.getByName(source), sourcePort),
+        InetSocketAddress(InetAddress.getByName(destination), destinationPort),
+      ) ?: Process.INVALID_UID
+    }.getOrDefault(Process.INVALID_UID) else Process.INVALID_UID
+    val packages = if (uid >= 0) packageManager.getPackagesForUid(uid).orEmpty().toList() else emptyList()
+    val appPackage = packages.firstOrNull { it != this.packageName }
+    val label = appPackage?.let { name ->
+      runCatching { packageManager.getApplicationLabel(packageManager.getApplicationInfo(name, 0)).toString() }.getOrNull()
+    } ?: if (uid >= 0) "Приложение UID $uid" else "Не определено"
+    val id = "$protocol|$source:$sourcePort|$destination:$destinationPort"
+    val item = buildMap<String, Any> {
+      put("id", id)
+      put("protocol", if (protocol == 6) "TCP" else if (protocol == 17) "UDP" else "OTHER")
+      put("appUid", uid)
+      if (appPackage != null) put("packageName", appPackage)
+      put("appLabel", label)
+      put("remoteAddress", destination)
+      put("remotePort", destinationPort)
+      put("lastSeenMillis", System.currentTimeMillis())
+    }
+    liveFlows[id] = item
+    val denied = uid >= 0 && ((currentBlockAll && appPackage != this.packageName) ||
+      (currentFirewallEnabled && packages.any(currentBlockedPackages::contains)))
+    return !denied
+  }
+
+  fun getLiveConnections(): List<Map<String, Any>> {
+    val cutoff = System.currentTimeMillis() - FLOW_RETENTION_MILLIS
+    liveFlows.entries.removeIf { entry -> (entry.value["lastSeenMillis"] as? Long ?: 0L) < cutoff }
+    return liveFlows.values.sortedByDescending { it["lastSeenMillis"] as? Long ?: 0L }
   }
 
   private fun tunConfigFor(domains: List<String>): TunConfig = TunConfig.Default.copy(
@@ -226,6 +383,11 @@ class CyberVpnService : VpnService() {
   )
 
   private fun establishTunnel(config: TunConfig): ParcelFileDescriptor {
+    if (currentFirewallEnabled) {
+      check(refreshAlwaysOnState() && refreshLockdownState()) {
+        "Firewall требует Always-on VPN и Block connections without VPN в настройках Android"
+      }
+    }
     val builder = Builder()
       .setSession("CyberVPN — Hysteria2")
       .setMtu(config.mtu)
@@ -238,6 +400,21 @@ class CyberVpnService : VpnService() {
         .addAddress(TunConfig.IPV6_ADDRESS, TunConfig.IPV6_PREFIX_LENGTH)
         .addDnsServer(TunConfig.IPV6_DNS_ADDRESS)
         .addRoute("::", 0)
+    }
+
+    if (currentFirewallEnabled) {
+      if (currentBlockAll) {
+        // Keep CyberVPN itself inside the VPN so the UI and tunnel can continue to operate.
+        builder.addAllowedApplication(packageName)
+      } else {
+        currentBlockedPackages.forEach { blockedPackage ->
+          // A removed package must not take down the VPN when the saved policy is restored.
+          if (runCatching { packageManager.getApplicationInfo(blockedPackage, 0) }.isSuccess) {
+            runCatching { builder.addDisallowedApplication(blockedPackage) }
+              .onFailure { Log.w(TAG, "Skipping unavailable blocked package: $blockedPackage", it) }
+          }
+        }
+      }
     }
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
@@ -358,6 +535,12 @@ class CyberVpnService : VpnService() {
     const val KEY_BYPASS_DOMAINS = "bypass_domains"
     const val KEY_DNS_TRANSPORT = "dns_transport"
     const val KEY_DNS_SERVERS = "dns_servers"
+    const val KEY_CONFIG_URI = "config_uri"
+    const val KEY_FIREWALL_ENABLED = "firewall_enabled"
+    const val KEY_BLOCK_ALL = "block_all_apps"
+    const val KEY_BLOCKED_PACKAGES = "blocked_packages"
+    const val KEY_LOCKDOWN_ENABLED = "lockdown_enabled"
+    const val KEY_ALWAYS_ON = "always_on"
     const val STATE_DISCONNECTED = "disconnected"
     const val STATE_CONNECTING = "connecting"
     const val STATE_CONNECTED = "connected"
@@ -366,6 +549,7 @@ class CyberVpnService : VpnService() {
     const val STATE_ERROR = "error"
     private const val CHANNEL_ID = "cybervpn_vpn"
     private const val NOTIFICATION_ID = 7201
+    private const val FLOW_RETENTION_MILLIS = 60_000L
     private const val TAG = "CyberVpnService"
   }
 }

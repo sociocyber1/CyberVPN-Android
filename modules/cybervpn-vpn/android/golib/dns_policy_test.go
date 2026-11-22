@@ -70,3 +70,15 @@ func TestDNSPolicy_BypassOnlyRoutesAAAAToDirect(t *testing.T) {
 		t.Fatal("A query without an exact rule must remain Remote")
 	}
 }
+
+func TestDNSPolicy_EmptyRulesKeepAllQueriesOnRemoteResolver(t *testing.T) {
+	p, err := newDNSPolicy(nil, "enabled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"example.com", "service.ru", "site.kz"} {
+		if id, direct := p.directRuleFor(dnsQuery(name)); direct {
+			t.Errorf("unconfigured domain %q unexpectedly routed direct with rule %q", name, id)
+		}
+	}
+}

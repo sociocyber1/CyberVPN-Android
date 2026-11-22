@@ -17,7 +17,7 @@ import (
 
 type Session struct {
 	closed         atomic.Bool
-	tcpFlowFilter  atomic.Pointer[tcpFlowFilterHolder]
+	flowFilter     atomic.Pointer[flowFilterHolder]
 	lifetime       context.Context
 	cancelLifetime context.CancelFunc
 	fastOpen       bool

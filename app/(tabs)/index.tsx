@@ -5,14 +5,14 @@ import * as Clipboard from "expo-clipboard";
 import * as Linking from "expo-linking";
 import { ScreenContainer } from "@/components/screen-container";
 import { readCachedConfigs, refreshConfigs, type ServerConfig } from "@/lib/config-feed";
-import { connectVpn, disconnectVpn, readVpnStatus, updateNoToVpnDomains, type VpnState } from "@/lib/vpn-native";
+import { connectVpn, disconnectVpn, readVpnStatus, type VpnState } from "@/lib/vpn-native";
 import { DEFAULT_NO_TO_VPN_SETTINGS, MAX_NO_TO_VPN_RULES, loadNoToVpnSettings, parseDomainSuffixes, parseNoToVpnSites, saveNoToVpnSettings } from "@/lib/no-to-vpn";
 import { DEFAULT_VPN_DNS_SETTINGS, loadVpnDnsSettings, parseVpnDnsServers, saveVpnDnsSettings, type VpnDnsTransport } from "@/lib/dns-settings";
+import { PUBLIC_DNS_PRESETS } from "@/lib/dns-presets";
 import { noToVpnStyles } from "@/lib/no-to-vpn-styles";
-import { COUNTRY_TLD_PRESET } from "@/lib/country-tld-presets";
 import { BANK_CARD_NUMBER, ORGANIZATION_NAME, PROJECT_YOUTUBE_URL, SOCIOCYBERNEERING_VIDEO_URL, copyBankCardNumber, openSupportDestination } from "@/lib/support-info";
 
-const COLORS = { bg: "#061012", ink: "#DDF8F1", muted: "#7F9E99", blue: "#35E0B2", pale: "#102B2A", line: "#1B3B37", white: "#0B191A", green: "#B6FF57" };
+const COLORS = { bg: "#F4F8FC", ink: "#101D2D", muted: "#708095", blue: "#2386F4", pale: "#E7F2FF", line: "#E3EAF2", white: "#FFFFFF", green: "#198754" };
 
 export default function HomeScreen() {
   const pulse = useMemo(() => new Animated.Value(0), []);
@@ -22,6 +22,8 @@ export default function HomeScreen() {
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
   const [feedError, setFeedError] = useState(false);
   const [supportVisible, setSupportVisible] = useState(false);
+  const [configPickerVisible, setConfigPickerVisible] = useState(false);
+  const [dnsPickerVisible, setDnsPickerVisible] = useState(false);
   const [supportNotice, setSupportNotice] = useState<string | null>(null);
   const [projectNotice, setProjectNotice] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -119,9 +121,30 @@ export default function HomeScreen() {
     finally { setVpnDnsBusy(false); }
   };
 
-  const applyNoToVpnSettings = async (enabled: boolean, savedMessage = "Исключения сохранены.") => {
+  const addDnsPreset = (presetId: string) => {
+    const preset = PUBLIC_DNS_PRESETS.find((entry) => entry.id === presetId);
+    const additions = preset?.servers[vpnDns.transport];
+    if (!preset || !additions) return;
+    const existing = vpnDnsInput.split(/[\s,;]+/u).map((item) => item.trim()).filter(Boolean);
+    const merged = [...new Set([...existing, ...additions])];
+    if (merged.length > 8) {
+      setVpnDnsError("В списке может быть не более 8 DNS-серверов. Удалите лишние адреса или выберите другой транспорт.");
+      return;
+    }
+    setVpnDnsInput(merged.join(", "));
+    setVpnDnsError(null);
+    setVpnDnsNotice(`${preset.name} добавлен. Нажмите «Сохранить DNS», чтобы применить настройку.`);
+    setDnsPickerVisible(false);
+  };
+
+  const applyNoToVpnSettings = async (enabled: boolean) => {
     if (!noToVpnLoaded) {
       setNoToVpnError("Параметры NoToVPN ещё загружаются. Повторите через мгновение.");
+      return;
+    }
+    if (vpnState !== "disconnected") {
+      setNoToVpnError("Чтобы изменить NoToVPN, дождитесь полного отключения VPN, сохраните правила и подключитесь снова. Живое обновление туннеля отключено для защиты соединения.");
+      setNoToVpnNotice(null);
       return;
     }
     const parsed = parseDomainSuffixes(noToVpnInput);
@@ -137,39 +160,19 @@ export default function HomeScreen() {
       setNoToVpnNotice(null);
       return;
     }
-    if (enabled && parsed.suffixes.length + parsedSites.domains.length === 0) {
-      setNoToVpnError("Для включения NoToVPN добавьте хотя бы одну зону или сайт.");
-      setNoToVpnNotice(null);
-      return;
-    }
 
-    const previous = noToVpnSettings;
     const next = { enabled, suffixes: parsed.suffixes, sites: parsedSites.domains };
-    const rules = [...parsed.suffixes, ...parsedSites.domains];
-    const updateRunningTunnel = Platform.OS === "android" && vpnState === "connected";
     setNoToVpnBusy(true);
     setNoToVpnError(null);
     setNoToVpnNotice(null);
     try {
-      if (updateRunningTunnel) {
-        await updateNoToVpnDomains(enabled ? rules : []);
-      }
-      try {
-        await saveNoToVpnSettings(next);
-      } catch (error) {
-        if (updateRunningTunnel) {
-          await updateNoToVpnDomains(previous.enabled ? [...previous.suffixes, ...previous.sites] : []).catch(() => undefined);
-        }
-        throw error;
-      }
+      await saveNoToVpnSettings(next);
       setNoToVpnSettings(next);
       setNoToVpnInput(parsed.suffixes.join(", "));
       setNoToVpnSiteInput(parsedSites.domains.join(", "));
-      setNoToVpnNotice(enabled && updateRunningTunnel
-        ? "NoToVPN включён: активный TUN обновлён."
-        : enabled
-          ? "NoToVPN включён; правила применятся при подключении VPN."
-          : "NoToVPN выключен.");
+      setNoToVpnNotice(enabled
+        ? "NoToVPN включён только для указанных доменов; правила применятся после переподключения VPN."
+        : "NoToVPN выключен; правила применятся после переподключения VPN.");
     } catch (error) {
       setNoToVpnError(error instanceof Error ? error.message : "Не удалось применить настройки NoToVPN.");
     } finally {
@@ -206,10 +209,6 @@ export default function HomeScreen() {
     if (!parsedSites.ok) { setNoToVpnError(parsedSites.error); return; }
     if (new Set([...parsedSuffixes.suffixes, ...parsedSites.domains]).size > MAX_NO_TO_VPN_RULES) {
       setNoToVpnError(`Можно сохранить не более ${MAX_NO_TO_VPN_RULES} правил NoToVPN суммарно.`);
-      return;
-    }
-    if (noToVpnSettings.enabled && parsedSuffixes.suffixes.length + parsedSites.domains.length === 0) {
-      setNoToVpnError("Для включения NoToVPN добавьте хотя бы одну зону или сайт.");
       return;
     }
     setVpnState("connecting");
@@ -273,7 +272,7 @@ export default function HomeScreen() {
     catch { setProjectNotice(`Не удалось открыть ссылку. Откройте вручную: ${SOCIOCYBERNEERING_VIDEO_URL}`); }
   };
   return (
-    <ScreenContainer containerClassName="bg-[#061012]">
+    <ScreenContainer containerClassName="bg-[#F4F8FC]">
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         <View style={styles.topRow}>
           <View style={styles.brandMark}><Text style={styles.brandMarkText}>C</Text></View>
@@ -293,10 +292,10 @@ export default function HomeScreen() {
         <View style={styles.sectionHead}><Text style={styles.sectionTitle}>Сервер</Text><Pressable onPress={() => void updateFeed()}><Text style={styles.blueText}>{refreshing ? "Проверяем…" : "Обновить"}</Text></Pressable></View>
         <Pressable style={styles.serverCard} onPress={() => {
           if (active) { Alert.alert("Сначала отключите VPN", "Чтобы сменить сервер, сначала остановите текущее соединение."); return; }
-          if (servers.length > 1) Alert.alert("Выбор сервера", undefined, [...servers.map((s) => ({ text: s.name, onPress: () => setSelected(s.id) })), { text: "Отмена", style: "cancel" }]);
-        }}>
+          if (servers.length > 1) setConfigPickerVisible(true);
+        }} accessibilityRole="button" accessibilityLabel="Выбрать конфигурацию сервера">
           <View style={styles.flag}><MaterialCommunityIcons name="server-network-outline" size={21} color={COLORS.blue} /></View>
-          <View style={{ flex: 1 }}><Text style={styles.serverName}>{currentServer?.name ?? (refreshing ? "Загружаем список…" : "Нет доступных серверов")}</Text><Text style={styles.serverDetail}>{servers.length} {servers.length === 1 ? "сервер" : "серверов"} · Hysteria2</Text></View>
+          <View style={{ flex: 1 }}><Text style={styles.serverName}>{currentServer?.name ?? (refreshing ? "Загружаем список…" : "Нет доступных серверов")}</Text><Text style={styles.serverDetail}>{currentServer ? `#${String(servers.findIndex((server) => server.id === currentServer.id) + 1).padStart(2, "0")} · ` : ""}{servers.length} {servers.length === 1 ? "сервер" : "серверов"} · Hysteria2</Text></View>
           {refreshing ? <ActivityIndicator color={COLORS.blue} /> : <MaterialCommunityIcons name="chevron-right" size={23} color={COLORS.muted} />}
         </Pressable>
         <Text style={styles.feedNote}>{feedError ? "Не удалось проверить README. Показан сохранённый список, если он есть." : updatedAt ? `Список проверен ${updatedAt.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}` : "Источник: sociocyber1/txt · README.md"}</Text>
@@ -325,6 +324,9 @@ export default function HomeScreen() {
               </Pressable>
             ))}
           </View>
+          <Pressable onPress={() => setDnsPickerVisible(true)} disabled={!vpnDnsLoaded || vpnDnsBusy || active} style={[noToVpnStyles.saveButton, { marginTop: 8 }]} accessibilityRole="button">
+            <Text style={noToVpnStyles.saveText}>Добавить публичный DNS</Text>
+          </Pressable>
           <TextInput value={vpnDnsInput} onChangeText={(value) => { setVpnDnsInput(value); setVpnDnsError(null); setVpnDnsNotice(null); }} editable={vpnDnsLoaded && !vpnDnsBusy && !active} placeholder={vpnDns.transport === "https" ? "https://dns.google/dns-query" : vpnDns.transport === "tls" ? "dns.google, one.one.one.one" : "8.8.8.8, 8.8.4.4"} placeholderTextColor="#9AA7B7" multiline autoCapitalize="none" autoCorrect={false} style={noToVpnStyles.input} accessibilityLabel="Серверы DNS, используемые в VPN-туннеле" />
           <Pressable onPress={() => void applyVpnDnsSettings()} disabled={!vpnDnsLoaded || vpnDnsBusy || active} style={({ pressed }) => [noToVpnStyles.saveButton, pressed && { opacity: 0.8 }, (!vpnDnsLoaded || vpnDnsBusy || active) && { opacity: 0.5 }]} accessibilityRole="button">
             {vpnDnsBusy ? <ActivityIndicator color={COLORS.blue} /> : <Text style={noToVpnStyles.saveText}>Сохранить DNS</Text>}
@@ -336,24 +338,22 @@ export default function HomeScreen() {
           <View style={noToVpnStyles.header}>
             <View style={{ flex: 1 }}>
               <Text style={styles.sectionTitle}>NoToVPN</Text>
-              <Text style={noToVpnStyles.description}>Не отправлять выбранные доменные зоны через Hysteria2.</Text>
+              <Text style={noToVpnStyles.description}>Только выбранные домены идут напрямую; остальные соединения остаются в VPN.</Text>
             </View>
             <Switch
               value={noToVpnSettings.enabled}
               onValueChange={(enabled) => void applyNoToVpnSettings(enabled)}
-              disabled={!noToVpnLoaded || noToVpnBusy || !["disconnected", "connected", "error"].includes(vpnState)}
+              disabled={!noToVpnLoaded || noToVpnBusy || vpnState !== "disconnected"}
               trackColor={{ false: "#D4DDE8", true: "#91C6FF" }}
               thumbColor={noToVpnSettings.enabled ? COLORS.blue : "#FFFFFF"}
               accessibilityLabel="Включить или выключить NoToVPN"
             />
           </View>
-          <Pressable onPress={() => { setNoToVpnInput([...new Set([...noToVpnInput.split(/[\s,;]+/u).filter(Boolean), ...COUNTRY_TLD_PRESET])].join(", ")); setNoToVpnError(null); }} style={[noToVpnStyles.saveButton, { marginTop: 8 }]} accessibilityRole="button">
-            <Text style={noToVpnStyles.saveText}>Добавить все зоны стран и территорий ({COUNTRY_TLD_PRESET.length})</Text>
-          </Pressable>
+          <Text style={[noToVpnStyles.description, { marginTop: 10 }]}>Список пуст по умолчанию. Добавляйте только нужные вам зоны и сайты.</Text>
           <TextInput
             value={noToVpnInput}
             onChangeText={(value) => { setNoToVpnInput(value); setNoToVpnError(null); setNoToVpnNotice(null); }}
-            editable={noToVpnLoaded && !noToVpnBusy && ["disconnected", "connected", "error"].includes(vpnState)}
+            editable={noToVpnLoaded && !noToVpnBusy && vpnState === "disconnected"}
             placeholder="Например: .ru, .kz, .eu"
             placeholderTextColor="#9AA7B7"
             multiline
@@ -366,7 +366,7 @@ export default function HomeScreen() {
           <TextInput
             value={noToVpnSiteInput}
             onChangeText={(value) => { setNoToVpnSiteInput(value); setNoToVpnError(null); setNoToVpnNotice(null); }}
-            editable={noToVpnLoaded && !noToVpnBusy && ["disconnected", "connected", "error"].includes(vpnState)}
+            editable={noToVpnLoaded && !noToVpnBusy && vpnState === "disconnected"}
             placeholder="gosuslugi.ru, nalog.gov.ru"
             placeholderTextColor="#9AA7B7"
             multiline
@@ -377,23 +377,69 @@ export default function HomeScreen() {
           />
           <Pressable
             onPress={() => void applyNoToVpnSettings(noToVpnSettings.enabled)}
-            disabled={!noToVpnLoaded || noToVpnBusy || !["disconnected", "connected", "error"].includes(vpnState)}
+            disabled={!noToVpnLoaded || noToVpnBusy || vpnState !== "disconnected"}
             style={({ pressed }) => [noToVpnStyles.saveButton, pressed && { opacity: 0.8 }, (!noToVpnLoaded || noToVpnBusy) && { opacity: 0.5 }]}
             accessibilityRole="button"
           >
             {noToVpnBusy ? <ActivityIndicator color={COLORS.blue} /> : <Text style={noToVpnStyles.saveText}>Сохранить исключения</Text>}
           </Pressable>
           <Text style={noToVpnStyles.helper}>
-            Для выбранных доменов DNS-запросы идут напрямую через DNS физической сети; при активном Android Private DNS используется DoT, если имя сервера доступно, иначе — зашифрованный DoH. Ответы A/AAAA дают IP для прямой TCP/UDP-маршрутизации. DNS-провайдер видит эти запросы.
+            Правило влияет только на совпавший домен. Его DNS-запросы идут напрямую через DNS физической сети; при активном Android Private DNS используется DoT, если имя сервера доступно, иначе — зашифрованный DoH. Ответы A/AAAA дают IP для прямой TCP/UDP-маршрутизации. DNS-провайдер видит эти запросы.
           </Text>
           <Text style={noToVpnStyles.warning}>
-            Маршрут выбирается по IP из DNS-ответа: общий CDN-IP может временно обходить VPN и для других доменов до истечения TTL. Приложения с собственным DoH могут не раскрыть домен. Это не строгий доменный firewall.
+            Исключение сопоставляет домен через DNS и направляет напрямую только IP, полученные для него. Маршрут выбирается по IP из DNS-ответа: общий CDN-IP может временно обходить VPN и для других доменов до истечения TTL. Приложения с собственным DoH могут не раскрыть домен. Это не строгий доменный firewall.
           </Text>
           {noToVpnError ? <Text style={noToVpnStyles.error}>{noToVpnError}</Text> : null}
           {noToVpnNotice ? <Text style={noToVpnStyles.notice}>{noToVpnNotice}</Text> : null}
         </View>
         <Text style={styles.footnote}>Конфигурации обновляются из открытого репозитория. Для создания VPN Android запросит системное разрешение.</Text>
       </ScrollView>
+
+      <Modal visible={dnsPickerVisible} transparent animationType="slide" statusBarTranslucent onRequestClose={() => setDnsPickerVisible(false)}>
+        <View style={styles.pickerScrim}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setDnsPickerVisible(false)} accessibilityLabel="Закрыть список DNS" />
+          <View style={styles.pickerSheet}>
+            <View style={styles.handle} />
+            <View style={styles.pickerHeader}>
+              <View style={{ flex: 1 }}><Text style={styles.sheetTitle}>Бесплатные публичные DNS</Text><Text style={styles.pickerCount}>Транспорт: {vpnDns.transport.toUpperCase()} · адреса добавятся в список</Text></View>
+              <Pressable onPress={() => setDnsPickerVisible(false)} style={styles.pickerClose} accessibilityRole="button" accessibilityLabel="Закрыть"><MaterialCommunityIcons name="close" size={20} color={COLORS.muted} /></Pressable>
+            </View>
+            <ScrollView style={styles.pickerList} contentContainerStyle={{ paddingBottom: 8 }} showsVerticalScrollIndicator keyboardShouldPersistTaps="handled">
+              {PUBLIC_DNS_PRESETS.map((preset) => {
+                const servers = preset.servers[vpnDns.transport] ?? [];
+                return <Pressable key={preset.id} onPress={() => addDnsPreset(preset.id)} style={({ pressed }) => [styles.dnsPresetRow, pressed && { opacity: 0.82 }]} accessibilityRole="button">
+                  <View style={{ flex: 1 }}><Text style={styles.serverName}>{preset.name}</Text><Text style={styles.serverDetail}>{preset.detail}</Text><Text style={styles.dnsPresetServers}>{servers.join(" · ")}</Text></View>
+                  <MaterialCommunityIcons name="plus-circle-outline" size={22} color={COLORS.blue} />
+                </Pressable>;
+              })}
+              <Text style={styles.pickerCount}>Провайдер DNS будет видеть DNS-запросы. Выбранный DNS используется ядром VPN.</Text>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={configPickerVisible} transparent animationType="slide" statusBarTranslucent onRequestClose={() => setConfigPickerVisible(false)}>
+        <View style={styles.pickerScrim}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setConfigPickerVisible(false)} accessibilityLabel="Закрыть список конфигураций" />
+          <View style={styles.pickerSheet}>
+            <View style={styles.handle} />
+            <View style={styles.pickerHeader}>
+              <View style={{ flex: 1 }}><Text style={styles.sheetTitle}>Выбор конфигурации</Text><Text style={styles.pickerCount}>{servers.length} серверов · выберите один</Text></View>
+              <Pressable onPress={() => setConfigPickerVisible(false)} style={styles.pickerClose} accessibilityRole="button" accessibilityLabel="Закрыть"><MaterialCommunityIcons name="close" size={20} color={COLORS.muted} /></Pressable>
+            </View>
+            <ScrollView style={styles.pickerList} contentContainerStyle={{ paddingBottom: 8 }} showsVerticalScrollIndicator keyboardShouldPersistTaps="handled">
+              {servers.map((server, index) => {
+                const isSelected = server.id === selected;
+                return <Pressable key={server.id} onPress={() => { setSelected(server.id); setConfigPickerVisible(false); }} style={({ pressed }) => [styles.pickerRow, isSelected && styles.pickerRowSelected, pressed && { opacity: 0.82 }]} accessibilityRole="button" accessibilityState={{ selected: isSelected }}>
+                  <View style={[styles.pickerIndex, isSelected && styles.pickerIndexSelected]}><Text style={[styles.pickerIndexText, isSelected && { color: COLORS.green }]}>{String(index + 1).padStart(2, "0")}</Text></View>
+                  <View style={{ flex: 1 }}><Text style={styles.serverName} numberOfLines={1}>{server.name}</Text><Text style={styles.serverDetail} numberOfLines={1}>Hysteria2 · конфигурация #{String(index + 1).padStart(2, "0")}</Text></View>
+                  <MaterialCommunityIcons name={isSelected ? "check-circle" : "chevron-right"} size={21} color={isSelected ? COLORS.green : COLORS.muted} />
+                </Pressable>;
+              })}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
 
       <Modal visible={supportVisible} transparent animationType="fade" onRequestClose={() => setSupportVisible(false)}>
         <Pressable style={styles.scrim} onPress={() => setSupportVisible(false)}>
@@ -417,5 +463,5 @@ export default function HomeScreen() {
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: COLORS.bg }, content: { paddingHorizontal: 22, paddingTop: 18, paddingBottom: 36 }, topRow: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 16 }, brandMark: { width: 42, height: 42, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: COLORS.pale, borderWidth: 1, borderColor: COLORS.blue }, brandMarkText: { color: COLORS.white, fontSize: 23, fontWeight: "800" }, brand: { color: COLORS.ink, fontSize: 19, fontWeight: "800", letterSpacing: 1.2, fontFamily: "monospace" }, caption: { color: COLORS.blue, fontSize: 9, fontWeight: "700", letterSpacing: 1.05, marginTop: 2, fontFamily: "monospace" }, refreshButton: { width: 42, height: 42, alignItems: "center", justifyContent: "center", borderRadius: 14, backgroundColor: COLORS.white, borderWidth: 1, borderColor: COLORS.line }, refreshGlyph: { color: COLORS.blue }, hero: { backgroundColor: COLORS.white, borderRadius: 22, paddingVertical: 25, alignItems: "center", borderWidth: 1, borderColor: COLORS.line, marginBottom: 23, shadowColor: COLORS.blue, shadowOpacity: 0.09, shadowRadius: 20, shadowOffset: { width: 0, height: 0 } }, statusRow: { flexDirection: "row", alignItems: "center", gap: 7 }, statusDot: { width: 7, height: 7, borderRadius: 5 }, statusText: { color: COLORS.muted, fontSize: 11, fontWeight: "800", letterSpacing: 1.3, fontFamily: "monospace" }, powerButton: { width: 128, height: 128, borderRadius: 64, marginTop: 20, alignItems: "center", justifyContent: "center", backgroundColor: COLORS.pale, borderWidth: 1, borderColor: COLORS.line }, powerRing: { width: 94, height: 94, borderRadius: 47, alignItems: "center", justifyContent: "center", backgroundColor: COLORS.blue, elevation: 8, shadowColor: COLORS.blue, shadowOpacity: 0.22, shadowRadius: 16, shadowOffset: { width: 0, height: 8 } }, powerGlyph: { width: 44, height: 44, borderRadius: 22, borderWidth: 5, borderColor: COLORS.white, borderTopColor: "transparent", alignItems: "center", justifyContent: "center" }, powerStem: { position: "absolute", top: -5, width: 5, height: 24, borderRadius: 3, backgroundColor: COLORS.white }, heroTitle: { color: COLORS.ink, fontSize: 18, fontWeight: "700", marginTop: 17 }, heroSub: { color: COLORS.muted, fontSize: 12, marginTop: 5 }, sectionHead: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }, sectionTitle: { color: COLORS.ink, fontSize: 16, fontWeight: "700" }, blueText: { color: COLORS.blue, fontSize: 13, fontWeight: "700" }, serverCard: { minHeight: 72, backgroundColor: COLORS.white, borderRadius: 18, borderWidth: 1, borderColor: COLORS.line, padding: 14, flexDirection: "row", alignItems: "center", gap: 12 }, flag: { width: 42, height: 42, borderRadius: 14, backgroundColor: COLORS.pale, justifyContent: "center", alignItems: "center" }, serverName: { color: COLORS.ink, fontSize: 14, fontWeight: "700" }, serverDetail: { color: COLORS.muted, fontSize: 12, marginTop: 3 },  feedNote: { color: COLORS.muted, fontSize: 11, marginTop: 8, marginBottom: 19 }, supportCard: { backgroundColor: COLORS.white, borderWidth: 1, borderColor: COLORS.line, borderRadius: 20, padding: 17 }, supportIntro: { flexDirection: "row", alignItems: "center", gap: 11 },  supportTitle: { color: COLORS.ink, fontSize: 15, fontWeight: "700" }, supportSub: { color: COLORS.muted, fontSize: 11, marginTop: 2 }, supportCopy: { color: "#596A7E", fontSize: 12, lineHeight: 18, marginTop: 12 }, requisites: { marginTop: 14, borderRadius: 14, borderWidth: 1, borderColor: COLORS.line, backgroundColor: "#102021", minHeight: 62, paddingHorizontal: 13, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, bankName: { color: COLORS.muted, fontSize: 10, fontWeight: "700" }, cardNumber: { color: COLORS.ink, fontSize: 17, letterSpacing: 0.7, fontWeight: "800", marginTop: 3 }, copied: { color: COLORS.green, fontSize: 12, fontWeight: "700", marginTop: 10 }, footnote: { textAlign: "center", color: COLORS.muted, fontSize: 10, lineHeight: 15, marginTop: 17, paddingHorizontal: 7 }, scrim: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(9,22,39,0.42)" }, sheet: { backgroundColor: COLORS.white, borderTopLeftRadius: 26, borderTopRightRadius: 26, paddingHorizontal: 23, paddingTop: 11, paddingBottom: Platform.OS === "web" ? 25 : 36 }, handle: { width: 38, height: 4, borderRadius: 3, backgroundColor: COLORS.line, alignSelf: "center", marginBottom: 18 }, sheetTitle: { color: COLORS.ink, fontSize: 18, fontWeight: "800" }, sheetCard: { color: COLORS.muted, fontSize: 15, fontWeight: "700", marginTop: 6, marginBottom: 17 }, actionPrimary: { height: 50, borderRadius: 14, backgroundColor: COLORS.blue, alignItems: "center", justifyContent: "center", marginBottom: 9 }, actionPrimaryText: { color: COLORS.white, fontSize: 14, fontWeight: "700" }, actionSecondary: { height: 49, borderRadius: 14, borderWidth: 1, borderColor: COLORS.line, alignItems: "center", justifyContent: "center", marginBottom: 9, backgroundColor: COLORS.white }, actionSecondaryText: { color: COLORS.ink, fontSize: 14, fontWeight: "700" }, sbpHint: { color: COLORS.muted, fontSize: 11, lineHeight: 16, marginTop: 2 }, cancel: { alignItems: "center", paddingTop: 15, paddingBottom: 4 }, cancelText: { color: COLORS.blue, fontSize: 14, fontWeight: "700" },
+  screen: { flex: 1, backgroundColor: COLORS.bg }, content: { paddingHorizontal: 22, paddingTop: 18, paddingBottom: 36 }, topRow: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 16 }, brandMark: { width: 42, height: 42, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: COLORS.blue }, brandMarkText: { color: COLORS.white, fontSize: 23, fontWeight: "800" }, brand: { color: COLORS.ink, fontSize: 19, fontWeight: "800", letterSpacing: -0.5 }, caption: { color: COLORS.muted, fontSize: 9, fontWeight: "700", letterSpacing: 1.05, marginTop: 2 }, refreshButton: { width: 42, height: 42, alignItems: "center", justifyContent: "center", borderRadius: 14, backgroundColor: COLORS.white, borderWidth: 1, borderColor: COLORS.line }, refreshGlyph: { color: COLORS.blue, fontSize: 24, fontWeight: "600" }, hero: { backgroundColor: COLORS.white, borderRadius: 26, paddingVertical: 25, alignItems: "center", borderWidth: 1, borderColor: COLORS.line, marginBottom: 23 }, statusRow: { flexDirection: "row", alignItems: "center", gap: 7 }, statusDot: { width: 7, height: 7, borderRadius: 5 }, statusText: { color: COLORS.muted, fontSize: 11, fontWeight: "800", letterSpacing: 1.3 }, powerButton: { width: 128, height: 128, borderRadius: 64, marginTop: 20, alignItems: "center", justifyContent: "center", backgroundColor: COLORS.pale }, powerRing: { width: 94, height: 94, borderRadius: 47, alignItems: "center", justifyContent: "center", backgroundColor: COLORS.blue, elevation: 8, shadowColor: COLORS.blue, shadowOpacity: 0.22, shadowRadius: 16, shadowOffset: { width: 0, height: 8 } }, powerGlyph: { width: 44, height: 44, borderRadius: 22, borderWidth: 5, borderColor: COLORS.white, borderTopColor: "transparent", alignItems: "center", justifyContent: "center" }, powerStem: { position: "absolute", top: -5, width: 5, height: 24, borderRadius: 3, backgroundColor: COLORS.white }, heroTitle: { color: COLORS.ink, fontSize: 18, fontWeight: "700", marginTop: 17 }, heroSub: { color: COLORS.muted, fontSize: 12, marginTop: 5 }, sectionHead: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }, sectionTitle: { color: COLORS.ink, fontSize: 16, fontWeight: "700" }, blueText: { color: COLORS.blue, fontSize: 13, fontWeight: "700" }, serverCard: { minHeight: 72, backgroundColor: COLORS.white, borderRadius: 18, borderWidth: 1, borderColor: COLORS.line, padding: 14, flexDirection: "row", alignItems: "center", gap: 12 }, flag: { width: 42, height: 42, borderRadius: 14, backgroundColor: COLORS.pale, justifyContent: "center", alignItems: "center" }, serverName: { color: COLORS.ink, fontSize: 14, fontWeight: "700" }, serverDetail: { color: COLORS.muted, fontSize: 12, marginTop: 3 }, chevron: { color: COLORS.muted, fontSize: 26, marginLeft: 8 }, feedNote: { color: COLORS.muted, fontSize: 11, marginTop: 8, marginBottom: 19 }, supportCard: { backgroundColor: COLORS.white, borderWidth: 1, borderColor: COLORS.line, borderRadius: 20, padding: 17 }, supportIntro: { flexDirection: "row", alignItems: "center", gap: 11 }, heart: { color: COLORS.blue, fontSize: 28, lineHeight: 34 }, supportTitle: { color: COLORS.ink, fontSize: 15, fontWeight: "700" }, supportSub: { color: COLORS.muted, fontSize: 11, marginTop: 2 }, supportCopy: { color: "#596A7E", fontSize: 12, lineHeight: 18, marginTop: 12 }, requisites: { marginTop: 14, borderRadius: 14, borderWidth: 1, borderColor: COLORS.line, backgroundColor: "#F9FBFD", minHeight: 62, paddingHorizontal: 13, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, bankName: { color: COLORS.muted, fontSize: 10, fontWeight: "700" }, cardNumber: { color: COLORS.ink, fontSize: 17, letterSpacing: 0.7, fontWeight: "800", marginTop: 3 }, copied: { color: COLORS.green, fontSize: 12, fontWeight: "700", marginTop: 10 }, pickerScrim: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(9,22,39,0.42)" }, pickerSheet: { maxHeight: "88%", backgroundColor: COLORS.white, borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 18, paddingTop: 11, paddingBottom: Platform.OS === "web" ? 18 : 24 }, pickerHeader: { flexDirection: "row", alignItems: "center", marginBottom: 12 }, pickerCount: { color: COLORS.muted, fontSize: 11, marginTop: 4 }, pickerClose: { width: 36, height: 36, borderRadius: 11, borderWidth: 1, borderColor: COLORS.line, alignItems: "center", justifyContent: "center" }, pickerList: { flexGrow: 0, flexShrink: 1, height: 420 }, dnsPresetRow: { minHeight: 72, paddingHorizontal: 12, paddingVertical: 10, marginBottom: 7, flexDirection: "row", alignItems: "center", gap: 11, borderRadius: 13, borderWidth: 1, borderColor: COLORS.line, backgroundColor: "#F9FBFD" }, dnsPresetServers: { color: COLORS.green, fontFamily: "monospace", fontSize: 10, marginTop: 5 }, pickerRow: { minHeight: 65, paddingHorizontal: 10, paddingVertical: 9, marginBottom: 7, flexDirection: "row", alignItems: "center", gap: 11, borderRadius: 13, borderWidth: 1, borderColor: COLORS.line, backgroundColor: "#F9FBFD" }, pickerRowSelected: { borderColor: COLORS.blue, backgroundColor: COLORS.pale }, pickerIndex: { width: 38, height: 38, borderRadius: 11, backgroundColor: COLORS.pale, borderWidth: 1, borderColor: COLORS.line, alignItems: "center", justifyContent: "center" }, pickerIndexSelected: { borderColor: COLORS.blue }, pickerIndexText: { color: COLORS.blue, fontFamily: "monospace", fontSize: 13, fontWeight: "800" }, footnote: { textAlign: "center", color: COLORS.muted, fontSize: 10, lineHeight: 15, marginTop: 17, paddingHorizontal: 7 }, scrim: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(9,22,39,0.42)" }, sheet: { backgroundColor: COLORS.white, borderTopLeftRadius: 26, borderTopRightRadius: 26, paddingHorizontal: 23, paddingTop: 11, paddingBottom: Platform.OS === "web" ? 25 : 36 }, handle: { width: 38, height: 4, borderRadius: 3, backgroundColor: "#D4DDE8", alignSelf: "center", marginBottom: 18 }, sheetTitle: { color: COLORS.ink, fontSize: 18, fontWeight: "800" }, sheetCard: { color: COLORS.muted, fontSize: 15, fontWeight: "700", marginTop: 6, marginBottom: 17 }, actionPrimary: { height: 50, borderRadius: 14, backgroundColor: COLORS.blue, alignItems: "center", justifyContent: "center", marginBottom: 9 }, actionPrimaryText: { color: COLORS.white, fontSize: 14, fontWeight: "700" }, actionSecondary: { height: 49, borderRadius: 14, borderWidth: 1, borderColor: COLORS.line, alignItems: "center", justifyContent: "center", marginBottom: 9, backgroundColor: COLORS.white }, actionSecondaryText: { color: COLORS.ink, fontSize: 14, fontWeight: "700" }, sbpHint: { color: COLORS.muted, fontSize: 11, lineHeight: 16, marginTop: 2 }, cancel: { alignItems: "center", paddingTop: 15, paddingBottom: 4 }, cancelText: { color: COLORS.blue, fontSize: 14, fontWeight: "700" },
 });

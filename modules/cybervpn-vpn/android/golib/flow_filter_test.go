@@ -33,3 +33,41 @@ func TestTCPFlowFilterRejectsBeforeForwardingOrDirectDNS(t *testing.T) {
 		})
 	}
 }
+
+type recordingFlowFilter struct {
+	protocols []int32
+	allowed   bool
+}
+
+func (f *recordingFlowFilter) Allow(protocol int32, _ string, _ int32, _ string, _ int32) bool {
+	f.protocols = append(f.protocols, protocol)
+	return f.allowed
+}
+
+func TestFlowFilterReceivesTCPAndUDPProtocolNumbers(t *testing.T) {
+	session := &Session{}
+	filter := &recordingFlowFilter{allowed: false}
+	session.SetFlowFilter(filter)
+	source := M.ParseSocksaddr("10.0.0.2:40000")
+	destination := M.ParseSocksaddr("198.51.100.8:443")
+
+	if session.allowTCPFlow(source, destination) {
+		t.Fatal("TCP flow should be denied")
+	}
+	if session.allowUDPFlow(source, destination) {
+		t.Fatal("UDP flow should be denied")
+	}
+	if len(filter.protocols) != 2 || filter.protocols[0] != 6 || filter.protocols[1] != 17 {
+		t.Fatalf("protocol callbacks = %v, want [6 17]", filter.protocols)
+	}
+}
+
+func TestFlowFilterDefaultsToAllow(t *testing.T) {
+	session := &Session{}
+	if !session.allowTCPFlow(M.ParseSocksaddr("10.0.0.2:40000"), M.ParseSocksaddr("198.51.100.8:443")) {
+		t.Fatal("TCP should be allowed when no filter is configured")
+	}
+	if !session.allowUDPFlow(M.ParseSocksaddr("10.0.0.2:40000"), M.ParseSocksaddr("198.51.100.8:443")) {
+		t.Fatal("UDP should be allowed when no filter is configured")
+	}
+}

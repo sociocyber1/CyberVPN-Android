@@ -54,7 +54,7 @@ interface HysteriaClient {
         tunConfig: TunConfig = TunConfig.Default,
         protector: SocketProtector,
         tun: TunFactory,
-        flowFilter: TcpFlowFilter? = null,
+        flowFilter: FlowFilter? = null,
     )
 
     /**
@@ -175,10 +175,11 @@ interface HysteriaClient {
      */
     enum class LogLevel { DEBUG, INFO, WARN, ERROR }
 
-    /** Decides whether a captured TCP flow may be forwarded. */
-    fun interface TcpFlowFilter {
-        /** Called before forwarding, using the flow's original numeric addresses. */
+    /** Observes and optionally denies captured TCP/UDP flows before forwarding. */
+    fun interface FlowFilter {
+        /** Called before forwarding, using the original numeric tuple and IP protocol (6 TCP, 17 UDP). */
         fun allow(
+            protocol: Int,
             sourceAddress: String,
             sourcePort: Int,
             destinationAddress: String,

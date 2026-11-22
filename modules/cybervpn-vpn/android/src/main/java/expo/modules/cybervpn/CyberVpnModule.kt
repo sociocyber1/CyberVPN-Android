@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.net.VpnService
+import android.provider.Settings
 import androidx.core.content.ContextCompat
 import org.json.JSONArray
 import expo.modules.kotlin.activityresult.AppContextActivityResultContract
@@ -93,6 +94,64 @@ class CyberVpnModule : Module() {
       val context = requireNotNull(appContext.reactContext) { "Приложение уже закрыто" }
       readStatus(context)
     }
+
+    AsyncFunction("getInstalledApps") {
+      val context = requireNotNull(appContext.reactContext) { "Приложение уже закрыто" }
+      val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+      @Suppress("DEPRECATION")
+      context.packageManager.queryIntentActivities(launcherIntent, 0)
+        .mapNotNull { info ->
+          val packageName = info.activityInfo?.packageName ?: return@mapNotNull null
+          if (packageName == context.packageName) return@mapNotNull null
+          mapOf(
+            "packageName" to packageName,
+            "label" to info.loadLabel(context.packageManager).toString(),
+          )
+        }
+        .distinctBy { it["packageName"] }
+        .sortedBy { (it["label"] as? String)?.lowercase() ?: "" }
+    }
+
+    Function("getFirewallSettings") {
+      val context = requireNotNull(appContext.reactContext) { "Приложение уже закрыто" }
+      readFirewallSettings(context)
+    }
+
+    AsyncFunction("setFirewallSettings") Coroutine { enabled: Boolean, blockAll: Boolean, blockedPackages: List<String> ->
+      val context = requireNotNull(appContext.reactContext) { "Приложение уже закрыто" }
+      val policy = blockedPackages.distinct().filter { packageName ->
+        packageName.isNotBlank() && packageName != context.packageName &&
+          runCatching { context.packageManager.getApplicationInfo(packageName, 0) }.isSuccess
+      }.take(500)
+      val service = CyberVpnService.runningInstance
+      val preferences = context.getSharedPreferences(CyberVpnService.PREFERENCES, Context.MODE_PRIVATE)
+      val state = preferences.getString(CyberVpnService.KEY_STATE, CyberVpnService.STATE_DISCONNECTED)
+      if (enabled && (state != CyberVpnService.STATE_CONNECTED || service == null)) {
+        throw IllegalStateException("Сначала подключите CyberVPN: правила Firewall можно активировать только при установленном туннеле")
+      }
+      if (enabled && service?.let { it.refreshAlwaysOnState() && it.refreshLockdownState() } != true) {
+        throw IllegalStateException("Firewall недоступен: включите Always-on VPN и Block connections without VPN в настройках Android")
+      }
+      if (state in listOf(CyberVpnService.STATE_CONNECTING, CyberVpnService.STATE_RECONNECTING)) {
+        throw IllegalStateException("Дождитесь завершения подключения перед изменением Firewall")
+      }
+      service?.applyFirewallSettings(enabled, blockAll, policy)
+      preferences.edit()
+        .putBoolean(CyberVpnService.KEY_FIREWALL_ENABLED, enabled)
+        .putBoolean(CyberVpnService.KEY_BLOCK_ALL, blockAll)
+        .putString(CyberVpnService.KEY_BLOCKED_PACKAGES, JSONArray(policy).toString())
+        .apply()
+      readFirewallSettings(context)
+    }
+
+    AsyncFunction("openVpnSettings") {
+      val context = requireNotNull(appContext.reactContext) { "Приложение уже закрыто" }
+      context.startActivity(Intent(Settings.ACTION_VPN_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+
+    Function("getLiveConnections") {
+      CyberVpnService.runningInstance?.getLiveConnections().orEmpty()
+    }
   }
 
   private fun readStatus(context: Context): Map<String, String> {
@@ -114,5 +173,30 @@ class CyberVpnModule : Module() {
       put("state", state)
       if (!error.isNullOrBlank()) put("error", error)
     }
+  }
+
+  private fun readFirewallSettings(context: Context): Map<String, Any> {
+    val preferences = context.getSharedPreferences(CyberVpnService.PREFERENCES, Context.MODE_PRIVATE)
+    val service = CyberVpnService.runningInstance
+    val lockdown = service?.refreshLockdownState() == true
+    val alwaysOn = service?.refreshAlwaysOnState() == true
+    val storedPackages = try {
+      val json = JSONArray(preferences.getString(CyberVpnService.KEY_BLOCKED_PACKAGES, "[]") ?: "[]")
+      (0 until json.length()).mapNotNull { index -> json.optString(index).takeIf(String::isNotBlank) }
+    } catch (_: Throwable) { emptyList() }
+    val packages = storedPackages.filter { packageName ->
+      packageName != context.packageName && runCatching { context.packageManager.getApplicationInfo(packageName, 0) }.isSuccess
+    }
+    if (packages != storedPackages) preferences.edit()
+      .putString(CyberVpnService.KEY_BLOCKED_PACKAGES, JSONArray(packages).toString())
+      .apply()
+    return mapOf(
+      "enabled" to preferences.getBoolean(CyberVpnService.KEY_FIREWALL_ENABLED, false),
+      "blockAll" to preferences.getBoolean(CyberVpnService.KEY_BLOCK_ALL, false),
+      "blockedPackages" to packages,
+      "lockdownEnabled" to lockdown,
+      "alwaysOn" to alwaysOn,
+      "hasSavedConfig" to !preferences.getString(CyberVpnService.KEY_CONFIG_URI, null).isNullOrBlank(),
+    )
   }
 }

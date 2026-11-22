@@ -79,7 +79,7 @@ class HysteriaClientImpl : HysteriaClient {
         tunConfig: TunConfig,
         protector: HysteriaClient.SocketProtector,
         tun: HysteriaClient.TunFactory,
-        flowFilter: HysteriaClient.TcpFlowFilter?,
+        flowFilter: HysteriaClient.FlowFilter?,
     ): Unit = sessionLock.withLock {
         requireNotStarted()
         beginConnecting(config)
@@ -88,8 +88,8 @@ class HysteriaClientImpl : HysteriaClient {
             withContext(Dispatchers.IO) {
                 val s = openSession(config, tunConfig, protector, generation)
                 if (flowFilter != null) {
-                    s.setTCPFlowFilter { source, sourcePort, destination, destinationPort ->
-                        flowFilter.allow(source, sourcePort, destination, destinationPort)
+                    s.setFlowFilter { protocol, source, sourcePort, destination, destinationPort ->
+                        flowFilter.allow(protocol.toInt(), source, sourcePort.toInt(), destination, destinationPort.toInt())
                     }
                 }
                 val published = synchronized(lifecycleLock) {

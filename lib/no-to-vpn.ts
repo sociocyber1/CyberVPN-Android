@@ -7,9 +7,18 @@ export type SuffixParseResult = { ok: true; suffixes: string[] } | { ok: false; 
 export const NO_TO_VPN_STORAGE_KEY = "cybervpn.noToVpn.v1";
 export const DEFAULT_NO_TO_VPN_SETTINGS: NoToVpnSettings = {
   enabled: false,
-  suffixes: [".ru", ".kz", ".eu"],
-  sites: ["gosuslugi.ru", "government.ru", "nalog.gov.ru", "kremlin.ru"],
+  suffixes: [],
+  sites: [],
 };
+
+const LEGACY_DEFAULT_SUFFIXES = [".ru", ".kz", ".eu"];
+const LEGACY_DEFAULT_SITES = ["gosuslugi.ru", "government.ru", "nalog.gov.ru", "kremlin.ru"];
+
+function isLegacyPrefill(suffixes: string[], sites: string[]): boolean {
+  const same = (left: string[], right: string[]) => left.length === right.length &&
+    left.every((value) => right.includes(value));
+  return same(suffixes, LEGACY_DEFAULT_SUFFIXES) && same(sites, LEGACY_DEFAULT_SITES);
+}
 export const MAX_NO_TO_VPN_RULES = 400;
 
 function normalizeDomain(entry: string): string | null {
@@ -64,6 +73,12 @@ export async function loadNoToVpnSettings(): Promise<NoToVpnSettings> {
     const suffixes = parseDomainSuffixes(record.suffixes.join(" "));
     const sites = parseNoToVpnSites((record.sites ?? []).join(" "));
     if (!suffixes.ok || !sites.ok) throw new Error("Invalid settings");
+    // These exact entries were pre-filled by older app versions; they were not user rules.
+    if (isLegacyPrefill(suffixes.suffixes, sites.domains)) {
+      const empty = { ...DEFAULT_NO_TO_VPN_SETTINGS, suffixes: [], sites: [] };
+      await AsyncStorage.setItem(NO_TO_VPN_STORAGE_KEY, JSON.stringify(empty));
+      return empty;
+    }
     return { enabled: record.enabled, suffixes: suffixes.suffixes, sites: sites.domains };
   } catch {
     return { ...DEFAULT_NO_TO_VPN_SETTINGS, suffixes: [...DEFAULT_NO_TO_VPN_SETTINGS.suffixes], sites: [...DEFAULT_NO_TO_VPN_SETTINGS.sites] };
@@ -78,6 +93,5 @@ export async function saveNoToVpnSettings(settings: NoToVpnSettings): Promise<vo
   if (new Set([...suffixes.suffixes, ...sites.domains]).size > MAX_NO_TO_VPN_RULES) {
     throw new Error(`Можно сохранить не более ${MAX_NO_TO_VPN_RULES} правил NoToVPN суммарно.`);
   }
-  if (settings.enabled && suffixes.suffixes.length + sites.domains.length === 0) throw new Error("Для включения NoToVPN добавьте хотя бы одну зону или сайт.");
   await AsyncStorage.setItem(NO_TO_VPN_STORAGE_KEY, JSON.stringify({ enabled: settings.enabled, suffixes: suffixes.suffixes, sites: sites.domains }));
 }

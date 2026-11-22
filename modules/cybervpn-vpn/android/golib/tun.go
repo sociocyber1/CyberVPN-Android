@@ -343,6 +343,9 @@ func (h *tunHandler) NewPacketConnectionEx(ctx context.Context, conn N.PacketCon
 
 func (h *tunHandler) newPacketConnection(ctx context.Context, conn N.PacketConn, source M.Socksaddr, destination M.Socksaddr) error {
 	defer conn.Close()
+	if !h.session.allowUDPFlow(source, destination) {
+		return errors.New("UDP flow denied by owner policy")
+	}
 
 	if h.rejectIPv6(destination) {
 		log(LogLevelDebug, srcTun, "UDP refused, IPv6 disabled: %s → %s", source, destination)

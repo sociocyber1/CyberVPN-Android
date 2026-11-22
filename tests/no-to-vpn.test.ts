@@ -4,7 +4,24 @@ vi.mock("@react-native-async-storage/async-storage", () => ({
   default: { getItem: vi.fn(), setItem: vi.fn() },
 }));
 
-import { parseDomainSuffixes, parseNoToVpnSites, saveNoToVpnSettings } from "../lib/no-to-vpn";
+import { DEFAULT_NO_TO_VPN_SETTINGS, loadNoToVpnSettings, parseDomainSuffixes, parseNoToVpnSites, saveNoToVpnSettings } from "../lib/no-to-vpn";
+
+describe("NoToVPN defaults and migration", () => {
+  it("starts with no preset suffixes or sites", () => {
+    expect(DEFAULT_NO_TO_VPN_SETTINGS).toEqual({ enabled: false, suffixes: [], sites: [] });
+  });
+
+  it("clears the exact old built-in prefill instead of treating it as user rules", async () => {
+    const storage = await import("@react-native-async-storage/async-storage");
+    vi.mocked(storage.default.getItem).mockResolvedValueOnce(JSON.stringify({
+      enabled: true,
+      suffixes: [".ru", ".kz", ".eu"],
+      sites: ["gosuslugi.ru", "government.ru", "nalog.gov.ru", "kremlin.ru"],
+    }));
+    expect(await loadNoToVpnSettings()).toEqual({ enabled: false, suffixes: [], sites: [] });
+    expect(storage.default.setItem).toHaveBeenCalledWith("cybervpn.noToVpn.v1", JSON.stringify({ enabled: false, suffixes: [], sites: [] }));
+  });
+});
 
 describe("NoToVPN domain suffixes", () => {
   it("normalizes the confirmed local suffix examples and removes duplicates", () => {
@@ -45,6 +62,14 @@ describe("NoToVPN exact site list", () => {
     expect(parseNoToVpnSites("пример.рф")).toEqual({ ok: true, domains: ["xn--e1afmkfd.xn--p1ai"] });
     expect(parseNoToVpnSites("https://example.ru").ok).toBe(false);
     expect(parseNoToVpnSites("example.ru/path").ok).toBe(false);
+  });
+});
+
+describe("NoToVPN empty policy", () => {
+  it("can be enabled with no user rules and saves no direct routes", async () => {
+    const storage = await import("@react-native-async-storage/async-storage");
+    await expect(saveNoToVpnSettings({ enabled: true, suffixes: [], sites: [] })).resolves.toBeUndefined();
+    expect(storage.default.setItem).toHaveBeenCalledWith("cybervpn.noToVpn.v1", JSON.stringify({ enabled: true, suffixes: [], sites: [] }));
   });
 });
 
