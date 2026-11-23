@@ -279,7 +279,7 @@ export default function HomeScreen() {
     <ScreenContainer containerClassName="bg-[#F4F8FC]">
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         <View style={styles.topRow}>
-          <View style={styles.brandMark}><Image source={require("../../assets/images/icon.png")} style={{ width: 42, height: 42, borderRadius: 14 }} resizeMode="contain" accessible={false} /></View>
+          <View style={[styles.brandMark, { width: 48, height: 48, backgroundColor: "transparent" }]}><Image source={require("../../assets/images/icon.png")} style={{ width: 48, height: 48 }} resizeMode="contain" accessible={false} /></View>
           <View style={{ flex: 1, minWidth: 0 }}>
             <Text style={styles.brand}>CyberVPN</Text>
             <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.78} style={{ color: "#34445A", fontFamily: brandFontLoaded ? "LatinModernSans" : undefined, fontSize: 9, letterSpacing: 1.5, lineHeight: 13, marginTop: 1 }}>SocioCyberneering Inc.</Text>
