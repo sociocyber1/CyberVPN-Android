@@ -68,7 +68,7 @@ The Connections screen displays newly observed TCP/UDP flows through the VPN's T
 
 ## Release builds
 
-The [Android release workflow](.github/workflows/android-release.yml) runs when a GitHub Release is published and can also be started manually for an existing release tag. It generates the native Android project, builds the Hysteria2 Go AAR and the release APK, calculates a SHA-256 checksum, and uploads both files to the GitHub Release. To build a release that was published before the workflow existed, run **Actions → Android release APK → Run workflow** and enter its tag (for example, `v1.0.0`).
+The [Android release workflow](.github/workflows/android-release.yml) runs when a GitHub Release is published and can also be started manually. It generates the native Android project, builds the Hysteria2 Go AAR and release APK, and calculates a SHA-256 checksum. To build the selected branch without creating or changing a release, run **Actions → Android release APK → Run workflow**, leave `tag_name` blank, and download the APK/checksum from that run's artifacts. To build and attach to an existing release, enter its tag (for example, `v1.0.0`).
 
 The build uses the Android Gradle `release` variant, but Expo's generated Gradle project currently signs it with the default debug keystore. A fresh GitHub runner may generate a different debug key, so Android can reject an in-place update from an APK built by another run; uninstalling first may be required and can erase local settings. For production distribution and seamless updates, configure and protect a persistent Android signing keystore in GitHub Actions secrets; do not commit a keystore or signing passwords to the repository.
 

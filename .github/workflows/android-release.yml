@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: Existing GitHub Release tag to build and attach an APK to
-        required: true
+        description: Optional existing GitHub Release tag; leave blank to build the selected branch as an artifact
+        required: false
         type: string
 
 permissions:
@@ -31,20 +31,26 @@ jobs:
           INPUT_TAG: ${{ inputs.tag_name }}
         run: |
           TAG_NAME="${RELEASE_EVENT_TAG:-$INPUT_TAG}"
-          if [[ -z "$TAG_NAME" ]]; then
-            echo "No release tag was supplied." >&2
-            exit 1
+          if [[ -n "$TAG_NAME" ]]; then
+            if ! git check-ref-format "refs/tags/$TAG_NAME"; then
+              echo "Invalid release tag: $TAG_NAME" >&2
+              exit 1
+            fi
+            printf 'tag_name=%s\n' "$TAG_NAME" >> "$GITHUB_OUTPUT"
+            printf 'source_ref=%s\n' "$TAG_NAME" >> "$GITHUB_OUTPUT"
+            printf 'artifact_label=%s\n' "$TAG_NAME" >> "$GITHUB_OUTPUT"
+            printf 'upload_release=true\n' >> "$GITHUB_OUTPUT"
+          else
+            SOURCE_REF="${GITHUB_REF_NAME:-main}"
+            printf 'source_ref=%s\n' "$SOURCE_REF" >> "$GITHUB_OUTPUT"
+            printf 'artifact_label=%s-%s\n' "$SOURCE_REF" "${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+            printf 'upload_release=false\n' >> "$GITHUB_OUTPUT"
           fi
-          if ! git check-ref-format "refs/tags/$TAG_NAME"; then
-            echo "Invalid release tag: $TAG_NAME" >&2
-            exit 1
-          fi
-          printf 'tag_name=%s\n' "$TAG_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Check out the release source
         uses: actions/checkout@v5
         with:
-          ref: ${{ steps.release.outputs.tag_name }}
+          ref: ${{ steps.release.outputs.source_ref }}
           fetch-depth: 0
 
       - name: Set up Java
@@ -106,6 +112,7 @@ jobs:
           sha256sum release-artifacts/CyberVPN.apk | tee release-artifacts/SHA256SUMS.txt
 
       - name: Attach APK to GitHub Release
+        if: steps.release.outputs.upload_release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
@@ -115,7 +122,7 @@ jobs:
       - name: Upload build artifact to workflow run
         uses: actions/upload-artifact@v4
         with:
-          name: CyberVPN-${{ steps.release.outputs.tag_name }}
+          name: CyberVPN-${{ steps.release.outputs.artifact_label }}
           path: release-artifacts/*
           if-no-files-found: error
           retention-days: 30
