@@ -13,12 +13,12 @@ import { DEFAULT_VPN_DNS_SETTINGS, loadVpnDnsSettings, parseVpnDnsServers, saveV
 import { PUBLIC_DNS_PRESETS } from "@/lib/dns-presets";
 import { noToVpnStyles } from "@/lib/no-to-vpn-styles";
 import { BANK_CARD_NUMBER, CYBERCORD_REPOSITORY_URL, ORGANIZATION_NAME, PROJECT_YOUTUBE_URL, SOCIOCYBERNEERING_VIDEO_URL, copyBankCardNumber, openSupportDestination } from "@/lib/support-info";
+import { VpnPlanet } from "@/components/vpn-planet";
 
 const COLORS = { bg: "#F4F8FC", ink: "#101D2D", muted: "#708095", blue: "#2386F4", pale: "#E7F2FF", line: "#E3EAF2", white: "#FFFFFF", green: "#198754" };
 
 export default function HomeScreen() {
   const [brandFontLoaded] = useFonts({ LatinModernSans: require("../../assets/fonts/lmsans10-regular.otf") });
-  const pulse = useMemo(() => new Animated.Value(0), []);
   const refreshRotation = useMemo(() => new Animated.Value(0), []);
   const [servers, setServers] = useState<ServerConfig[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -111,16 +111,6 @@ export default function HomeScreen() {
     return () => { active = false; };
   }, []);
   const currentServer = useMemo(() => servers.find((server) => server.id === selected), [servers, selected]);
-
-  useEffect(() => {
-    const loop = Animated.loop(Animated.sequence([
-      Animated.timing(pulse, { toValue: 1, duration: 1250, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
-      Animated.timing(pulse, { toValue: 0, duration: 1250, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
-    ]));
-    if (vpnState === "disconnected" || vpnState === "connecting" || vpnState === "reconnecting") loop.start();
-    else pulse.stopAnimation();
-    return () => loop.stop();
-  }, [pulse, vpnState]);
 
   const applyVpnDnsSettings = async () => {
     const parsed = parseVpnDnsServers(vpnDnsInput, vpnDns.transport);
@@ -304,9 +294,7 @@ export default function HomeScreen() {
 
         <View style={styles.hero}>
           <View style={styles.statusRow}><View style={[styles.statusDot, { backgroundColor: statusColor }]} /><Text style={[styles.statusText, { color: statusColor }]}>{statusLabels[vpnState]}</Text></View>
-          <Pressable onPress={() => void handleVpnToggle()} style={({ pressed }) => [styles.powerButton, pressed && { opacity: 0.86 }]} accessibilityRole="button" accessibilityLabel={active ? "Отключить VPN" : "Подключить VPN"}>
-            <Animated.View style={[styles.powerRing, { transform: [{ scale: pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.055] }) }] }, vpnState === "connected" && { backgroundColor: COLORS.green }]}><View style={styles.powerGlyph}><View style={styles.powerStem} /></View></Animated.View>
-          </Pressable>
+          <VpnPlanet onPress={() => void handleVpnToggle()} connected={vpnState === "connected"} label={active ? "Отключить VPN" : "Подключить VPN"} />
           <Text style={styles.heroTitle}>{vpnState === "connected" ? "Защищённое соединение" : vpnState === "error" ? "Подключение не удалось" : "Подключиться к VPN"}</Text>
           <Text style={styles.heroSub}>{vpnError ?? (vpnState === "connected" ? "Туннель Hysteria2 активен" : vpnState === "disconnecting" ? "Закрываем туннель…" : active ? "Ожидаем ответа сервера…" : "Нажмите, чтобы начать защищённое соединение")}</Text>
         </View>
