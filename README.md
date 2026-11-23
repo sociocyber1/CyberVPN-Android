@@ -12,6 +12,12 @@ CyberVPN is a Russian-language Android VPN client built with Expo/React Native a
 
 > The image above is a mobile-sized interface preview, not a capture from an installed Android device. A successful APK build verifies packaging, but VPN routing should still be tested on the target device and network.
 
+## Interface demo
+
+[![CyberVPN interface demo](docs/videos/cybervpn-ui-demo.gif)](docs/videos/cybervpn-ui-demo.mp4)
+
+This short clip uses screenshots from the mobile Preview to show the VPN, Firewall, and Connections screens. It demonstrates interface layout only: VPN is disconnected in Preview, Firewall app blocking depends on Android Lockdown, and live connection monitoring requires the installed Android build.
+
 ## Download and install
 
 1. Open the [latest GitHub Release](https://github.com/sociocyber1/CyberVPN-Android/releases/latest) and download **`CyberVPN.apk`**.
