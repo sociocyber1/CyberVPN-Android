@@ -1,44 +1,91 @@
 # CyberVPN for Android
 
+CyberVPN is a Russian-language Android VPN client built with Expo/React Native and a native Android `VpnService`. It uses the Hysteria2 protocol and is intended to stay small and straightforward: choose a server, approve Android's VPN prompt, and connect.
+
 <p align="center">
   <img src="docs/images/app-icon.png" alt="CyberVPN app icon" width="112" />
 </p>
-
-<p align="center"><strong>A clean, Russian-language Hysteria2 VPN client for Android.</strong><br />Simple controls, configurable DNS, and opt-in domain and site exclusions.</p>
-
+<p align="center"><strong>Simple controls · Hysteria2 · configurable DNS and routing</strong></p>
 <p align="center">
   <img src="docs/images/app-home-preview.png" alt="CyberVPN home screen preview" width="320" />
 </p>
 
-> **Screenshot note:** This is a mobile-sized app preview, not a screenshot from an installed Android build. The Android release build is being corrected and has not been published yet.
+> The image above is a mobile-sized interface preview, not a capture from an installed Android device. A successful APK build verifies packaging, but VPN routing should still be tested on the target device and network.
 
-## Highlights
+## Download and install
 
-- One-tap VPN connection using Hysteria2 configurations from the project’s configured feed.
-- Android `VpnService` integration with a native Kotlin bridge and the Hysteria Go core.
-- User-selectable DNS upstreams: UDP, TCP, DNS-over-TLS (DoT), and DNS-over-HTTPS (DoH).
-- NoToVPN controls with separate domain-zone and individual-site lists, exact host rules, and wildcard/subdomain rules.
-- Optional preset of active country-code top-level domains from IANA; it is not enabled automatically.
-- Russian-language interface, with no advertisements or subscription prompts.
+1. Open the [latest GitHub Release](https://github.com/sociocyber1/CyberVPN-Android/releases/latest) and download **`CyberVPN.apk`**.
+2. On the Android device, open the downloaded APK. If Android asks, allow the browser or file manager to install unknown apps, then retry the installer.
+3. Open CyberVPN, choose a server, and tap **Подключиться к VPN** (Connect to VPN).
+4. Accept Android's system VPN connection request. Android displays the active VPN key/status icon while the tunnel is running.
 
-## Android release
+CyberVPN targets **Android 10 / API 29 or later**. The native Hysteria2 core is built for `arm64-v8a` and `armeabi-v7a`. This project distributes APKs through GitHub Releases; it is not currently listed in Google Play.
 
-**APK: not available yet.** The first Dashboard release attempt stopped during Kotlin compilation because the native module could not resolve its generated `BuildConfig`. The source fix now enables and imports the library's generated `BuildConfig`; it still needs a fresh successful Dashboard build. The repository currently contains the application source and interface preview, not an installable APK.
+To upgrade, install the APK from the newer release over the existing copy. If Android reports a signature conflict, do not uninstall immediately if you need the app's local settings; contact the maintainer with the exact message. Release APKs must be signed consistently for in-place upgrades, so signing-key continuity is important for future builds.
 
-## Build environment
+## What the app does
 
-This is an Expo / React Native project with a local Expo Android module and Go Hysteria core. The supported release build is produced through the project’s Android build workflow; a browser preview or TypeScript check alone does not verify the Android APK or a live VPN tunnel.
+### VPN connection and server configuration
 
-## Repository contents
+- Connects through Android's native `VpnService`; the Go core is built from a pinned Hysteria2 source revision.
+- Downloads `hy2://` server URIs from the configured [sociocyber1/txt README](https://github.com/sociocyber1/txt/blob/main/README.md) when the app starts and keeps a local cache for fallback when refreshing fails.
+- Shows the connection state reported by the Android service rather than assuming a tap succeeded.
+- Requests VPN consent through Android's system dialog; the user can disconnect from the app at any time except when Android lockdown policy requires an active always-on VPN.
 
-- `app/`, `components/`, `lib/` — Expo UI, settings, and application logic.
-- `modules/cybervpn-vpn/` — Android `VpnService`, Kotlin bridge, and Go DNS/tunnel core.
-- `docs/` — integration notes, domain-list sources, and interface preview assets.
+### DNS settings
 
-## Privacy and routing notes
+Choose custom DNS upstreams for requests sent through the tunnel: UDP, TCP, DNS-over-TLS (DoT), or DNS-over-HTTPS (DoH). The app supports up to eight configured upstream addresses. The selected DNS setup is saved locally and used by the native Go core after reconnection.
 
-NoToVPN is DNS-aware IP routing, not a strict per-domain firewall. Shared CDN addresses can temporarily affect routing for other domains, and apps using their own encrypted DNS may not reveal hostnames to the VPN module. Direct DNS for NoToVPN exclusions is intentionally separate from ordinary DNS routed through the VPN tunnel.
+### NoToVPN domain and site exclusions
+
+NoToVPN is **off by default**. When enabled, explicitly configured domain zones and site rules are resolved and routed directly over the device's physical network rather than through Hysteria. The initial suggestions include `.ru`, `.kz`, `.eu`, and a Russian public-sector site list; suggestions do not activate the feature by themselves. The optional country-code zone preset adds a broad list only after the user selects it.
+
+Rules support exact host names and zone/subdomain matching. The total rule limit is 400. NoToVPN is DNS-aware IP routing, **not** a strict per-domain firewall: shared CDN addresses may temporarily affect other domains, and applications using their own encrypted DNS or cached IPs may bypass hostname-based decisions. Directly routed excluded traffic does not use the Hysteria tunnel.
+
+### VPN Firewall and app exclusions
+
+The Firewall screen lets the user select installed applications for blocking while CyberVPN is active. Android's per-app VPN include/exclude lists alone do not block the excluded app; real blocking requires Android **Always-on VPN** and **Block connections without VPN** (lockdown). Follow the in-app warning and enable these OS settings before relying on the firewall. If the tunnel stops while lockdown is active, Android may block non-VPN traffic by design.
+
+A separate per-app **VPN exclusion** option sends selected applications over the ordinary device network instead of the VPN. That traffic exposes the normal network's public address to those applications and their services. It is not the same as firewall blocking.
+
+### Live connections
+
+The Connections screen displays newly observed TCP/UDP flows through the VPN's TUN interface, with destination IP/port, age, and an application label when Android can resolve the owning UID. It is a short-lived view (up to about 60 seconds), not a complete list of every socket or every packet on the device. Some flows have no attributable application. Blocking a flow's app requires the Android lockdown conditions above.
+
+## Privacy and limitations
+
+- Android and other apps may be able to detect that a VPN transport is active; CyberVPN does not hide the VPN from the operating system.
+- Services reached through the tunnel can observe the VPN server's exit IP. Direct NoToVPN traffic and apps excluded from VPN use the ordinary network instead.
+- The server configuration source and the selected DNS providers receive the requests needed to provide those services. Review their own policies if this matters for your use.
+- DNS-derived routing can be imprecise for shared CDNs, encrypted DNS, and cached addresses. Do not treat it as a security boundary or a guarantee that every request for a domain uses one route.
+- VPN operation depends on the selected server, network and Android device. A successful installation does not certify reachability from every country, ISP or mobile network.
+
+## Release builds
+
+The [Android release workflow](.github/workflows/android-release.yml) runs when a GitHub Release is published and can also be started manually for an existing release tag. It generates the native Android project, builds the Hysteria2 Go AAR and the release APK, calculates a SHA-256 checksum, and uploads both files to the GitHub Release. To build a release that was published before the workflow existed, run **Actions → Android release APK → Run workflow** and enter its tag (for example, `v1.0.0`).
+
+The build uses the Android Gradle `release` variant, but Expo's generated Gradle project currently signs it with the default debug keystore. A fresh GitHub runner may generate a different debug key, so Android can reject an in-place update from an APK built by another run; uninstalling first may be required and can erase local settings. For production distribution and seamless updates, configure and protect a persistent Android signing keystore in GitHub Actions secrets; do not commit a keystore or signing passwords to the repository.
+
+## Build locally
+
+A native build requires Node.js, pnpm 9.12.0, JDK 21, Android SDK/NDK, and a Go toolchain. The Gradle `preBuild` task runs `modules/cybervpn-vpn/android/build-hysteria-aar.sh`, which downloads the pinned Go toolchain and Hysteria source as needed and uses `gomobile` to create the native AAR. The Android module requires NDK side-by-side and `ANDROID_HOME` or `ANDROID_SDK_ROOT`.
+
+```bash
+pnpm install --frozen-lockfile
+pnpm exec expo prebuild --platform android --no-install
+cd android
+./gradlew assembleRelease
+```
+
+The APK is written to `android/app/build/outputs/apk/release/app-release.apk`. A TypeScript check or web Preview does not replace a native Gradle build or a real-device VPN test.
+
+## Repository layout
+
+- `app/`, `components/`, `lib/` — Expo screens and application logic.
+- `modules/cybervpn-vpn/` — Expo bridge, Android service, and Go/Hysteria2 core integration.
+- `docs/` — Android integration notes, routing sources, and interface preview assets.
+- `.github/workflows/android-release.yml` — release APK automation.
 
 ## License
 
-GPL-3.0. See [`LICENSE`](LICENSE) and [`THIRD_PARTY.md`](THIRD_PARTY.md) for licensing and third-party notices.
+CyberVPN is distributed under GPL-3.0. See [`LICENSE`](LICENSE) and [`THIRD_PARTY.md`](THIRD_PARTY.md) for license and third-party notices. The bundled Latin Modern Sans typeface has its own included GUST Font License in [`assets/fonts/GUST-FONT-LICENSE.txt`](assets/fonts/GUST-FONT-LICENSE.txt).

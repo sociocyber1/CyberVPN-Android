@@ -1,0 +1,120 @@
+name: Android release APK
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Existing GitHub Release tag to build and attach an APK to
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-release-${{ github.event.release.tag_name || inputs.tag_name || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-apk:
+    name: Build and attach APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        env:
+          RELEASE_EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag_name }}
+        run: |
+          TAG_NAME="${RELEASE_EVENT_TAG:-$INPUT_TAG}"
+          if [[ -z "$TAG_NAME" ]]; then
+            echo "No release tag was supplied." >&2
+            exit 1
+          fi
+          if ! git check-ref-format "refs/tags/$TAG_NAME"; then
+            echo "Invalid release tag: $TAG_NAME" >&2
+            exit 1
+          fi
+          printf 'tag_name=%s\n' "$TAG_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.tag_name }}
+          fetch-depth: 0
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        shell: bash
+        run: |
+          sdkmanager --install "ndk;27.2.12479018"
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [[ -z "$SDK_ROOT" ]]; then
+            echo "Android SDK path was not set by setup-android." >&2
+            exit 1
+          fi
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate native Android project
+        run: pnpm exec expo prebuild --platform android --no-install
+
+      - name: Build release APK
+        working-directory: android
+        run: ./gradlew --no-daemon --stacktrace assembleRelease
+
+      - name: Stage APK
+        shell: bash
+        run: |
+          APK_SOURCE="android/app/build/outputs/apk/release/app-release.apk"
+          if [[ ! -s "$APK_SOURCE" ]]; then
+            echo "Expected APK was not produced: $APK_SOURCE" >&2
+            find android/app/build/outputs -maxdepth 5 -type f -print 2>/dev/null || true
+            exit 1
+          fi
+          mkdir -p release-artifacts
+          cp "$APK_SOURCE" release-artifacts/CyberVPN.apk
+          sha256sum release-artifacts/CyberVPN.apk | tee release-artifacts/SHA256SUMS.txt
+
+      - name: Attach APK to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: gh release upload "$RELEASE_TAG" release-artifacts/CyberVPN.apk release-artifacts/SHA256SUMS.txt --repo "$RELEASE_REPOSITORY" --clobber
+
+      - name: Upload build artifact to workflow run
+        uses: actions/upload-artifact@v4
+        with:
+          name: CyberVPN-${{ steps.release.outputs.tag_name }}
+          path: release-artifacts/*
+          if-no-files-found: error
+          retention-days: 30
