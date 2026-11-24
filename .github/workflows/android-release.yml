@@ -103,6 +103,18 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      - name: Verify release keystore password and alias
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! keytool -list -storetype PKCS12 \
+              -keystore "$CYBERVPN_RELEASE_STORE_FILE" \
+              -storepass "$CYBERVPN_RELEASE_KEYSTORE_PASSWORD" \
+              -alias "$CYBERVPN_RELEASE_KEY_ALIAS" >/dev/null 2>&1; then
+            echo "Could not open the PKCS#12 release keystore with the configured password and alias. Check CYBERVPN_RELEASE_KEYSTORE_PASSWORD and CYBERVPN_RELEASE_KEY_ALIAS in GitHub Actions secrets." >&2
+            exit 1
+          fi
+
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
