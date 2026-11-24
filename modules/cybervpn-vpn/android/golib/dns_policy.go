@@ -13,22 +13,25 @@ type directDomainRule struct {
 }
 
 type dnsPolicy struct {
-	directDomains  map[string]string
-	directSuffixes map[string]string
-	ipv6Mode       string
+	directDomains   map[string]string
+	directSuffixes  map[string]string
+	directWildcards map[string]string
+	ipv6Mode        string
 }
 
 func newDNSPolicy(rules []directDomainRule, ipv6Mode string) (*dnsPolicy, error) {
 	p := &dnsPolicy{
-		directDomains:  make(map[string]string, len(rules)),
-		directSuffixes: make(map[string]string, len(rules)),
-		ipv6Mode:       ipv6Mode,
+		directDomains:   make(map[string]string, len(rules)),
+		directSuffixes:  make(map[string]string, len(rules)),
+		directWildcards: make(map[string]string, len(rules)),
+		ipv6Mode:        ipv6Mode,
 	}
 	for _, rule := range rules {
 		rawName := strings.TrimSpace(rule.Name)
 		suffix := false
+		wildcard := false
 		if strings.HasPrefix(rawName, "*.") {
-			rawName, suffix = strings.TrimPrefix(rawName, "*."), true
+			rawName, suffix, wildcard = strings.TrimPrefix(rawName, "*."), true, true
 		} else if strings.HasPrefix(rawName, ".") {
 			rawName, suffix = strings.TrimPrefix(rawName, "."), true
 		}
@@ -42,6 +45,9 @@ func newDNSPolicy(rules []directDomainRule, ipv6Mode string) (*dnsPolicy, error)
 		destination := p.directDomains
 		if suffix {
 			destination = p.directSuffixes
+		}
+		if wildcard {
+			destination = p.directWildcards
 		}
 		if existing, ok := destination[name]; ok && existing != rule.ID {
 			return nil, fmt.Errorf("duplicate direct DNS domain %q", name)
@@ -71,6 +77,12 @@ func (p *dnsPolicy) directRuleFor(query []byte) (string, bool) {
 	bestRule := ""
 	for suffix, ruleID := range p.directSuffixes {
 		if (name == suffix || strings.HasSuffix(name, "."+suffix)) && len(suffix) > bestLength {
+			bestLength = len(suffix)
+			bestRule = ruleID
+		}
+	}
+	for suffix, ruleID := range p.directWildcards {
+		if strings.HasSuffix(name, "."+suffix) && len(suffix) >= bestLength {
 			bestLength = len(suffix)
 			bestRule = ruleID
 		}

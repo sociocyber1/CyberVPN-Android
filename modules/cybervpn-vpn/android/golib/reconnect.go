@@ -18,6 +18,7 @@ import (
 
 const (
 	watchdogInterval = 30 * time.Second
+	retryInterval    = 1 * time.Second
 	idleProbeTicks   = 2
 	probeDNSServer   = "1.1.1.1:53"
 
@@ -358,15 +359,33 @@ func (rc *reconnectClient) watchdog() {
 	defer close(rc.watchdogDone)
 	ticker := time.NewTicker(watchdogInterval)
 	defer ticker.Stop()
+	retryTicker := time.NewTicker(retryInterval)
+	defer retryTicker.Stop()
 	for {
 		select {
 		case <-rc.stopWatchdog:
 			return
 		case <-rc.pokeCh:
 			rc.checkNow()
+		case <-retryTicker.C:
+			rc.retryIfDown()
 		case <-ticker.C:
 			rc.tick()
 		}
+	}
+}
+
+// retryIfDown keeps reconnect attempts close to their backoff deadline. The
+// slower watchdog remains responsible for probing established connections.
+func (rc *reconnectClient) retryIfDown() {
+	rc.mu.Lock()
+	down := !rc.closed && !rc.fatal.Load() && rc.inner == nil
+	rc.mu.Unlock()
+	if !down || rc.awaitingFirstUse.Load() {
+		return
+	}
+	if _, err := rc.currentClient(srcWatchdog); err != nil && !errors.Is(err, errDialBackoff) {
+		log(LogLevelDebug, srcWatchdog, "Scheduled re-dial failed: %s", err)
 	}
 }
 
@@ -429,13 +448,6 @@ func (rc *reconnectClient) tick() {
 	rc.mu.Unlock()
 
 	if c == nil {
-		if rc.awaitingFirstUse.Load() {
-			return
-		}
-		log(LogLevelDebug, srcWatchdog, "Down and idle; re-dialing")
-		if _, err := rc.currentClient(srcWatchdog); err != nil {
-			log(LogLevelDebug, srcWatchdog, "Idle re-dial failed: %s", err)
-		}
 		return
 	}
 

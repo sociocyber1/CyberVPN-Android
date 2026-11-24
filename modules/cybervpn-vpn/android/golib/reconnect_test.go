@@ -234,6 +234,48 @@ func TestCurrentClient_backoffSuppressesReconnectingSpam(t *testing.T) {
 	}
 }
 
+func TestRetryIfDownRetriesAfterBackoff(t *testing.T) {
+	calls := 0
+	cf := func() (*client.Config, error) {
+		calls++
+		return nil, errors.New("network down")
+	}
+	rc := newTestReconnectClient(cf, &recordingHandler{})
+	rc.retryIfDown()
+	if calls != 1 {
+		t.Fatalf("expected an immediate retry attempt, got %d", calls)
+	}
+	rc.retryIfDown()
+	if calls != 1 {
+		t.Errorf("retry should respect the dial backoff, got %d attempts", calls)
+	}
+	rc.resetBackoff()
+	rc.retryIfDown()
+	if calls != 2 {
+		t.Errorf("retry should run again after backoff expires, got %d attempts", calls)
+	}
+}
+
+func TestRetryIfDownSkipsLazyAndConnectedClients(t *testing.T) {
+	calls := 0
+	cf := func() (*client.Config, error) {
+		calls++
+		return nil, errors.New("network down")
+	}
+	rc := newTestReconnectClient(cf, &recordingHandler{})
+	rc.awaitingFirstUse.Store(true)
+	rc.retryIfDown()
+	if calls != 0 {
+		t.Fatalf("lazy client must not dial before first use, got %d attempts", calls)
+	}
+	rc.awaitingFirstUse.Store(false)
+	rc.inner = noopClient{}
+	rc.retryIfDown()
+	if calls != 0 {
+		t.Errorf("retry must not dial while a client is connected, got %d attempts", calls)
+	}
+}
+
 func TestPoke_nonBlockingAndCoalesces(t *testing.T) {
 	rc := &reconnectClient{pokeCh: make(chan struct{}, 1)}
 	rc.poke()
