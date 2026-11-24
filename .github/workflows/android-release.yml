@@ -109,7 +109,7 @@ jobs:
           fi
           mkdir -p release-artifacts
           cp "$APK_SOURCE" release-artifacts/CyberVPN.apk
-          sha256sum release-artifacts/CyberVPN.apk | tee release-artifacts/SHA256SUMS.txt
+          (cd release-artifacts && sha256sum CyberVPN.apk | tee SHA256SUMS.txt)
 
       - name: Attach APK to GitHub Release
         if: steps.release.outputs.upload_release == 'true'
