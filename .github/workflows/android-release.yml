@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: Optional existing GitHub Release tag; leave blank to build the selected branch as an artifact
+        description: Optional existing GitHub Release tag to receive this build; source is the selected branch or ref
         required: false
         type: string
 
@@ -22,6 +22,11 @@ jobs:
     name: Build and attach APK
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      CYBERVPN_RELEASE_KEYSTORE_BASE64: ${{ secrets.CYBERVPN_RELEASE_KEYSTORE_BASE64 }}
+      CYBERVPN_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.CYBERVPN_RELEASE_KEYSTORE_PASSWORD }}
+      CYBERVPN_RELEASE_KEY_ALIAS: ${{ secrets.CYBERVPN_RELEASE_KEY_ALIAS }}
+      CYBERVPN_RELEASE_KEY_PASSWORD: ${{ secrets.CYBERVPN_RELEASE_KEY_PASSWORD }}
     steps:
       - name: Resolve release tag
         id: release
@@ -30,8 +35,8 @@ jobs:
           RELEASE_EVENT_TAG: ${{ github.event.release.tag_name }}
           INPUT_TAG: ${{ inputs.tag_name }}
         run: |
-          TAG_NAME="${RELEASE_EVENT_TAG:-$INPUT_TAG}"
-          if [[ -n "$TAG_NAME" ]]; then
+          if [[ -n "$RELEASE_EVENT_TAG" ]]; then
+            TAG_NAME="$RELEASE_EVENT_TAG"
             if ! git check-ref-format "refs/tags/$TAG_NAME"; then
               echo "Invalid release tag: $TAG_NAME" >&2
               exit 1
@@ -39,6 +44,16 @@ jobs:
             printf 'tag_name=%s\n' "$TAG_NAME" >> "$GITHUB_OUTPUT"
             printf 'source_ref=%s\n' "$TAG_NAME" >> "$GITHUB_OUTPUT"
             printf 'artifact_label=%s\n' "$TAG_NAME" >> "$GITHUB_OUTPUT"
+            printf 'upload_release=true\n' >> "$GITHUB_OUTPUT"
+          elif [[ -n "$INPUT_TAG" ]]; then
+            if ! git check-ref-format "refs/tags/$INPUT_TAG"; then
+              echo "Invalid release tag: $INPUT_TAG" >&2
+              exit 1
+            fi
+            printf 'tag_name=%s\n' "$INPUT_TAG" >> "$GITHUB_OUTPUT"
+            SOURCE_REF="${GITHUB_REF_NAME:-main}"
+            printf 'source_ref=%s\n' "$SOURCE_REF" >> "$GITHUB_OUTPUT"
+            printf 'artifact_label=%s-%s\n' "$SOURCE_REF" "${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
             printf 'upload_release=true\n' >> "$GITHUB_OUTPUT"
           else
             SOURCE_REF="${GITHUB_REF_NAME:-main}"
@@ -52,6 +67,35 @@ jobs:
         with:
           ref: ${{ steps.release.outputs.source_ref }}
           fetch-depth: 0
+
+      - name: Validate and stage the persistent release keystore
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(
+            CYBERVPN_RELEASE_KEYSTORE_BASE64
+            CYBERVPN_RELEASE_KEYSTORE_PASSWORD
+            CYBERVPN_RELEASE_KEY_ALIAS
+            CYBERVPN_RELEASE_KEY_PASSWORD
+          )
+          missing=()
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing required GitHub Actions secret(s): %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+          KEYSTORE_FILE="$RUNNER_TEMP/cybervpn-release-key.p12"
+          printf '%s' "$CYBERVPN_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_FILE"
+          chmod 600 "$KEYSTORE_FILE"
+          if [[ ! -s "$KEYSTORE_FILE" ]]; then
+            echo "The configured keystore secret decoded to an empty file." >&2
+            exit 1
+          fi
+          printf 'CYBERVPN_RELEASE_STORE_FILE=%s\n' "$KEYSTORE_FILE" >> "$GITHUB_ENV"
 
       - name: Set up Java
         uses: actions/setup-java@v5
@@ -96,6 +140,8 @@ jobs:
 
       - name: Build release APK
         working-directory: android
+        env:
+          CYBERVPN_REQUIRE_RELEASE_SIGNING: "true"
         run: ./gradlew --no-daemon --stacktrace assembleRelease
 
       - name: Stage APK

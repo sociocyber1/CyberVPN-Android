@@ -107,6 +107,7 @@ const config: ExpoConfig = {
   },
   plugins: [
     "expo-asset",
+    "./plugins/withAndroidReleaseSigning",
     "expo-router",
     [
       "expo-audio",
